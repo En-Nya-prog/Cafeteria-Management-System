@@ -1598,8 +1598,8 @@ const AuthView = ({ handleLogin, handleRegister }) => {
             <div className="login-logo">
               <Utensils size={32} />
             </div>
-            <h1 className="login-title">EBD Inventory</h1>
-            <p className="login-subtitle">School Cafeteria Management System</p>
+            <h1 className="login-title">E<sup>3</sup> Inventory</h1>
+            <p className="login-subtitle">Palm Cafeteria Management System</p>
           </div>
 
           <div className="login-body">
