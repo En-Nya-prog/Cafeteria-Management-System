@@ -1704,10 +1704,15 @@ const AuthView = ({ handleLogin, handleRegister }) => {
         </div>
 
         <div className="login-illustration">
+          <img
+            className="login-illustration-image"
+            src="/uploads/1774479222772-882267974.png"
+            alt="Freshly prepared cafeteria meal"
+          />
           <div className="login-illustration-content">
             <Sparkles size={48} />
             <h2>Fresh & Delicious</h2>
-            <p>Order your favorite meals from the school cafeteria with ease</p>
+            <p>Order your favorite meals from the Palm cafeteria with ease</p>
           </div>
         </div>
       </div>
