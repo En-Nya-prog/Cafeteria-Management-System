@@ -28,11 +28,11 @@ The Express API is exported from `server.js` for Vercel Functions. Vite builds t
 1. Import `En-Nya-prog/Cafeteria-Management-System` into Vercel and use the repository root as the project root. Keep the build command as `npm run build` and the output directory as `public` (also set in `vercel.json`).
 2. Create a managed PostgreSQL database and set `DATABASE_URL` in Vercel. Use the provider's pooled connection string where available; use a separate database for Preview deployments rather than sharing production data.
 3. Create a Vercel Blob store and connect it to the project. This supplies `BLOB_READ_WRITE_TOKEN` for public meal images; without it, image uploads return an explicit configuration error.
-4. Set `PAYSTACK_SECRET_KEY`, `EBD_ADMIN_EMAIL`, and a unique `EBD_ADMIN_PASSWORD` in Vercel. Use the Paystack **test** key for Preview and the **live** key for Production. The app rejects mismatched key types.
-5. In Production, set `APP_BASE_URL` to the canonical HTTPS origin, for example `https://cafeteria.example.edu`. Preview deployments use Vercel's deployment URL.
-6. Deploy and confirm `/api/healthz` returns `{"status":"ok"}`. Configure the Paystack webhook as `https://cafeteria.example.edu/api/webhooks/paystack`.
+4. For this free, non-commercial test deployment, set `PAYSTACK_MODE=test` and use a Paystack **test** `PAYSTACK_SECRET_KEY`. Also set `EBD_ADMIN_EMAIL` and a unique `EBD_ADMIN_PASSWORD`. The app rejects a live key in test mode. Never use this Hobby deployment for real sales or live payments.
+5. Set `APP_BASE_URL` to the HTTPS deployment origin if needed; Vercel's `VERCEL_URL` is used as the default.
+6. Deploy and confirm `/api/healthz` returns `{"status":"ok"}`. If testing webhooks, configure the Paystack test account webhook to `https://<your-vercel-domain>/api/webhooks/paystack`.
 7. Add meals and staff accounts through the admin UI. The menu starts empty; local CSV data and uploaded images are not automatically deployed.
-8. Before campus-wide use, verify PostgreSQL backups, image retention, Paystack webhook delivery, session/admin recovery, and a low-value live payment/refund rehearsal. Review provider usage limits and pricing for expected campus traffic.
+8. This Hobby deployment is for preview/testing only. Campus production requires a suitable paid Vercel plan, a production database plan, live Paystack credentials, backups, webhook checks, session/admin recovery, and a low-value payment/refund rehearsal. Review provider usage limits and pricing before launch.
 
 Rate-limit counters are stored in PostgreSQL so they are shared across Vercel Function instances. Enable appropriate Vercel Firewall protections as an additional edge control before public production use.
 

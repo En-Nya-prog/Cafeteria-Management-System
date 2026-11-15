@@ -82,13 +82,16 @@ export async function createApp(expressFramework = express) {
   const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
   const PAYMENT_RESERVATION_MS = 30 * 60 * 1000;
   const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+  const isTestPaystackMode = isVercel && (
+    isVercelPreview || process.env.PAYSTACK_MODE === "test"
+  );
   const APP_BASE_URL = process.env.APP_BASE_URL ||
     (isVercel && process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined);
 
   if (process.env.NODE_ENV === "production") {
-    const requiredPaystackPrefix = isVercelPreview ? "sk_test_" : "sk_live_";
+    const requiredPaystackPrefix = isTestPaystackMode ? "sk_test_" : "sk_live_";
     if (typeof PAYSTACK_SECRET_KEY !== "string" || !PAYSTACK_SECRET_KEY.startsWith(requiredPaystackPrefix)) {
-      throw new Error(`A ${isVercelPreview ? "test" : "live"} PAYSTACK_SECRET_KEY is required in this production environment.`);
+      throw new Error(`A ${isTestPaystackMode ? "test" : "live"} PAYSTACK_SECRET_KEY is required in this production environment.`);
     }
     let appUrl;
     try {
