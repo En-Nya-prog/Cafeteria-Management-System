@@ -40,8 +40,9 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { CATEGORY_TIMES } from './constants.js';
 import { Role } from './types.js';
-import { SyncService } from './services/SyncService.js';
+import { SyncService } from './services/SyncServiceRuntime.js';
 import './App.css';
 
 // --- Components ---
@@ -183,14 +184,6 @@ const Divider = ({ label }) => (
 );
 
 // --- Data ---
-
-const CATEGORY_TIMES = {
-  "Breakfast Meals": { start: "06:00", end: "10:30" },
-  "Lunch Meals": { start: "11:30", end: "15:00" },
-  "Snacks": { start: "15:00", end: "20:00" },
-  "Beverages": { start: "06:00", end: "20:00" },
-  "Desserts": { start: "11:30", end: "20:00" },
-};
 
 const CATEGORY_ICONS = {
   "Breakfast Meals": Sun,

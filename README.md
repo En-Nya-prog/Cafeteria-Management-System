@@ -1,6 +1,6 @@
 # EBD Inventory
 
-A cafeteria management app for browsing meals, managing inventory, recording sales, placing pre-orders, collecting feedback, and taking online payments. The active runtime is the React/Vite client in `src/App.jsx` and the Express/PostgreSQL API in `server.js`.
+A cafeteria management app for browsing meals, managing inventory, recording sales, placing pre-orders, collecting feedback, and taking online payments. The active runtime is the React/Vite client in `src/AppRuntime.jsx` and the Express/PostgreSQL API in `serverRuntime.js`. TypeScript entry points delegate to these same implementations.
 
 ## Local development
 
@@ -9,7 +9,7 @@ Requirements: Node.js 22 and PostgreSQL.
 1. Create a PostgreSQL database named `ebd_inventory`.
 2. Copy `.env.example` to `.env` and set `DATABASE_URL` to your local database connection string. Use Paystack test credentials for local checkout testing.
 3. Install dependencies with `npm ci`.
-4. Start the app with `npm run dev`, then open `http://localhost:3000`.
+4. Start the app with `npm run dev`, then open `http://localhost:3000`. To launch through the TypeScript entry point, use `npm run dev:tsx`.
 
 The development server creates demo accounts and sample meals only when their respective tables are empty:
 
@@ -29,7 +29,7 @@ The `render.yaml` Blueprint provisions a Render web service, a managed PostgreSQ
 2. Set `APP_BASE_URL` to the final HTTPS origin, for example `https://cafeteria.example.edu`.
 3. Set `PAYSTACK_SECRET_KEY` using Render's secret field. Use the Paystack live secret only after test-mode acceptance checks are complete.
 4. Set a unique `EBD_ADMIN_EMAIL` and a strong `EBD_ADMIN_PASSWORD` (10–128 characters). These are required when the production users table is first created.
-5. In Paystack, configure the webhook URL as `https://cafeteria.example.edu/api/webhooks/paystack`; verify the live account supports GHS and the checkout channels enabled in `server.js`.
+5. In Paystack, configure the webhook URL as `https://cafeteria.example.edu/api/webhooks/paystack`; verify the live account supports GHS and the checkout channels enabled in `serverRuntime.js`.
 6. Confirm the `/api/healthz` check is healthy, create the initial menu and staff accounts, and complete a live low-value payment/refund rehearsal before campus-wide launch.
 7. Enable managed database backups and test a restore. Back up uploaded images separately and test image access after deployment.
 

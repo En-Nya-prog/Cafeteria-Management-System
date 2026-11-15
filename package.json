@@ -7,9 +7,9 @@
     "node": "22.x"
   },
   "scripts": {
-    "dev": "node server.js",
-    "dev:tsx": "node server.js",
-    "start": "node server.js",
+    "dev": "node serverRuntime.js",
+    "dev:tsx": "tsx server.ts",
+    "start": "node serverRuntime.js",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
