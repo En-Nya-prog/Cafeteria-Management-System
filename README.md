@@ -36,7 +36,7 @@ The Express API is exported from `api/[...path].js` as a Vercel Function so API 
 
 ### New meal announcements
 
-Every existing Buyer account receives an in-app notification when a new meal is listed. Buyers can opt in to email and/or SMS from **Notifications**; SMS requires an international-format number such as `+233241234567`. Buyers can change their choices at any time. Add these server-only variables to Vercel to enable external delivery:
+Every existing Buyer account receives an in-app notification when a meal is added or updated. Buyers can opt in to email and/or SMS from **Notifications**; SMS requires an international-format number such as `+233241234567`. Buyers can change their choices at any time. Add these server-only variables to Vercel to enable external delivery:
 
 | Variable | Purpose |
 |---|---|

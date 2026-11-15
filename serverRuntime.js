@@ -763,15 +763,17 @@ export async function createApp(expressFramework = express) {
   const isStaff = requireRoles([ADMIN_ROLE, SELLER_ROLE]);
   const isBuyer = requireRoles([CUSTOMER_ROLE]);
 
-  const notifyBuyersOfNewMeal = async (meal, appUrl) => {
+  const notifyBuyersOfMealChange = async (meal, appUrl, action) => {
     const buyers = await db.prepare(`
       SELECT id, email, phone, meal_email_opt_in, meal_sms_opt_in
       FROM users
       WHERE role = ?
     `).all(CUSTOMER_ROLE);
     const timestamp = new Date().toISOString();
-    const title = "New meal available";
-    const message = `${meal.name} is now available for GHS ${Number(meal.price).toFixed(2)}.`;
+    const title = action === "updated" ? "Meal updated" : "New meal available";
+    const message = action === "updated"
+      ? `${meal.name} has been updated and is available for GHS ${Number(meal.price).toFixed(2)}.`
+      : `${meal.name} is now available for GHS ${Number(meal.price).toFixed(2)}.`;
 
     for (let offset = 0; offset < buyers.length; offset += 500) {
       const batch = buyers.slice(offset, offset + 500);
@@ -807,10 +809,10 @@ export async function createApp(expressFramework = express) {
     const smsBuyers = buyers.filter((buyer) => buyer.meal_sms_opt_in && buyer.phone);
     const [email, sms] = await Promise.all([
       deliverToOptedInBuyers("email", emailBuyers, (buyer) =>
-        sendMealEmail({ buyerEmail: buyer.email, meal, appUrl })
+        sendMealEmail({ buyerEmail: buyer.email, meal, appUrl, action })
       ),
       deliverToOptedInBuyers("SMS", smsBuyers, (buyer) =>
-        sendMealSms({ phone: buyer.phone, meal, appUrl })
+        sendMealSms({ phone: buyer.phone, meal, appUrl, action })
       ),
     ]);
 
@@ -957,19 +959,17 @@ export async function createApp(expressFramework = express) {
     await syncToCsv();
     let notifications;
     let notificationError;
-    if (!existingMeal) {
-      try {
-        const appUrl = APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
-        notifications = await notifyBuyersOfNewMeal({
-          id: id.trim(),
-          name: name.trim(),
-          category: category.trim(),
-          price: parsedPrice,
-        }, appUrl);
-      } catch (error) {
-        console.error("New meal in-app notifications could not be created:", error);
-        notificationError = "The meal was saved, but buyer notifications could not be created.";
-      }
+    try {
+      const appUrl = APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+      notifications = await notifyBuyersOfMealChange({
+        id: id.trim(),
+        name: name.trim(),
+        category: category.trim(),
+        price: parsedPrice,
+      }, appUrl, existingMeal ? "updated" : "new");
+    } catch (error) {
+      console.error("Meal notifications could not be created:", error);
+      notificationError = "The meal was saved, but buyer notifications could not be created.";
     }
     res.json({ success: true, notifications, notificationError });
   }));

@@ -38,6 +38,41 @@ test("refuses to call Resend when delivery credentials are missing", async () =>
   assert.equal(called, false);
 });
 
+test("labels meal edits as updates in email and SMS announcements", async () => {
+  let emailPayload;
+  await sendMealEmail({
+    buyerEmail: "buyer@example.com",
+    meal: { name: "Rice", category: "Lunch", price: 12 },
+    appUrl: "https://cafeteria.example",
+    action: "updated",
+    env: { RESEND_API_KEY: "test-key", RESEND_FROM_EMAIL: "E3 <menu@example.com>" },
+    fetchImpl: async (url, options) => {
+      emailPayload = JSON.parse(options.body);
+      return { ok: true, status: 200 };
+    },
+  });
+  assert.equal(emailPayload.subject, "Meal updated: Rice");
+  assert.match(emailPayload.text, /A meal was updated/);
+
+  let smsContent;
+  await sendMealSms({
+    phone: "+233241234567",
+    meal: { name: "Rice", price: 12 },
+    appUrl: "https://cafeteria.example",
+    action: "updated",
+    env: {
+      HUBTEL_CLIENT_ID: "client",
+      HUBTEL_CLIENT_SECRET: "secret",
+      HUBTEL_SENDER_ID: "E3Cafeteria",
+    },
+    fetchImpl: async (url) => {
+      smsContent = new URL(url).searchParams.get("Content");
+      return { ok: true, status: 200 };
+    },
+  });
+  assert.match(smsContent, /^Updated at E³ Cafeteria:/);
+});
+
 test("sends a new meal announcement to Hubtel using E.164 phone numbers", async () => {
   let request;
   await sendMealSms({
