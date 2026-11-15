@@ -298,10 +298,26 @@ export const SyncService = {
   async getNotifications() {
     try {
       const res = await fetch(`${API_BASE}/notifications`);
+      if (!res.ok) throw await readError(res, "Unable to fetch notifications");
       return await res.json();
     } catch (e) {
       return [];
     }
+  },
+
+  async getNotificationPreferences() {
+    const res = await fetch(`${API_BASE}/notification-preferences`);
+    if (!res.ok) throw await readError(res, "Unable to load notification settings");
+    return await res.json();
+  },
+
+  async saveNotificationPreferences(preferences) {
+    const res = await fetch(`${API_BASE}/notification-preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(preferences),
+    });
+    if (!res.ok) throw await readError(res, "Unable to save notification settings");
   },
 
   async sendNotification(notif) {

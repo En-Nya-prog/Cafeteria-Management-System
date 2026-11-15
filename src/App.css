@@ -2175,6 +2175,11 @@ button {
   color: var(--color-blue-600);
 }
 
+.notification-icon-meal {
+  background-color: var(--color-primary-100);
+  color: var(--color-primary-600);
+}
+
 .notification-icon-success {
   background-color: var(--color-primary-100);
   color: var(--color-primary-600);

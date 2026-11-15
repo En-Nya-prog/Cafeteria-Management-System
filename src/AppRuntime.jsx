@@ -812,7 +812,33 @@ const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProces
   );
 };
 
-const NotificationsView = ({ notifications, fetchData }) => {
+const NotificationsView = ({ notifications, fetchData, user }) => {
+  const [preferences, setPreferences] = useState(null);
+  const [isSavingPreferences, setIsSavingPreferences] = useState(false);
+  const [preferenceMessage, setPreferenceMessage] = useState("");
+
+  useEffect(() => {
+    if (user?.role !== Role.BUYER) return;
+    SyncService.getNotificationPreferences().then(setPreferences).catch((error) => {
+      setPreferenceMessage(error.message || "Unable to load notification settings.");
+    });
+  }, [user?.role]);
+
+  const savePreferences = async (event) => {
+    event.preventDefault();
+    if (!preferences || isSavingPreferences) return;
+    setIsSavingPreferences(true);
+    setPreferenceMessage("");
+    try {
+      await SyncService.saveNotificationPreferences(preferences);
+      setPreferenceMessage("Notification settings saved.");
+    } catch (error) {
+      setPreferenceMessage(error.message || "Unable to save notification settings.");
+    } finally {
+      setIsSavingPreferences(false);
+    }
+  };
+
   return (
     <div className="notifications-view">
       <div className="notifications-header">
@@ -825,6 +851,50 @@ const NotificationsView = ({ notifications, fetchData }) => {
         </Button>
       </div>
 
+      {user?.role === Role.BUYER && preferences && (
+        <Card className="feedback-form-card">
+          <h3 className="feedback-form-title">New meal alerts</h3>
+          <p className="page-subtitle">Choose how you want to hear about newly listed foods. In-app alerts are always on.</p>
+          <form onSubmit={savePreferences} className="feedback-form">
+            <label className="input-label">
+              <input
+                type="checkbox"
+                checked={preferences.email_opt_in}
+                onChange={(event) => setPreferences({ ...preferences, email_opt_in: event.target.checked })}
+              />{" "}
+              Email announcements
+            </label>
+            <label className="input-label">
+              <input
+                type="checkbox"
+                checked={preferences.sms_opt_in}
+                onChange={(event) => setPreferences({ ...preferences, sms_opt_in: event.target.checked })}
+              />{" "}
+              SMS announcements
+            </label>
+            <Input
+              label="Mobile number for SMS (international format)"
+              type="tel"
+              placeholder="+233241234567"
+              autoComplete="tel"
+              value={preferences.phone}
+              onChange={(event) => setPreferences({ ...preferences, phone: event.target.value })}
+              required={preferences.sms_opt_in}
+            />
+            <p className="page-subtitle">SMS messages may incur charges from your mobile provider. You can change these choices anytime.</p>
+            {preferenceMessage && <p role="status" aria-live="polite">{preferenceMessage}</p>}
+            <Button type="submit" disabled={isSavingPreferences}>
+              {isSavingPreferences ? "Saving..." : "Save notification settings"}
+            </Button>
+          </form>
+        </Card>
+      )}
+      {user?.role === Role.BUYER && !preferences && (
+        <p role={preferenceMessage ? "alert" : "status"} aria-live="polite">
+          {preferenceMessage || "Loading notification settings..."}
+        </p>
+      )}
+
       <div className="notifications-list">
         {notifications.map(n => (
           <motion.div
@@ -834,7 +904,7 @@ const NotificationsView = ({ notifications, fetchData }) => {
           >
             <Card className="notification-item" hover>
               <div className={`notification-icon notification-icon-${n.type}`}>
-                {n.type === 'order' ? <Clock size={20} /> : <CheckCircle size={20} />}
+                {n.type === 'order' ? <Clock size={20} /> : n.type === 'meal' ? <Package size={20} /> : <CheckCircle size={20} />}
               </div>
               <div className="notification-content">
                 <div className="notification-header">
@@ -1259,16 +1329,19 @@ const InventoryView = ({ user, fetchData }) => {
       Object.entries(formData).forEach(([key, value]) => mealData.append(key, value));
       if (imageFile) mealData.append("image", imageFile);
 
-      if (editingMeal) {
-        await SyncService.updateMeal(mealData, user?.role);
-      } else {
-        await SyncService.addMeal(mealData, user?.role);
-      }
+      const result = editingMeal
+        ? await SyncService.updateMeal(mealData, user?.role)
+        : await SyncService.addMeal(mealData, user?.role);
 
       resetMealForm();
       await fetchData();
       await loadInventory();
-      alert("Meal saved successfully!");
+      const notificationSummary = result?.notifications
+        ? ` ${result.notifications.inApp} buyers notified in-app; email ${result.notifications.email.sent} sent/${result.notifications.email.failed} failed; SMS ${result.notifications.sms.sent} sent/${result.notifications.sms.failed} failed.`
+        : result?.notificationError
+          ? ` ${result.notificationError}`
+          : "";
+      alert(`Meal saved successfully!${notificationSummary}`);
     } catch (error) {
       console.error("Error saving meal:", error);
       alert(error.message || "Failed to save meal.");
@@ -1987,7 +2060,7 @@ export default function App() {
     { id: 'inventory', label: user.role === Role.SELLER ? 'My Foods' : 'Inventory', icon: Package, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'sellers', label: 'Sellers', icon: Users, roles: [Role.ADMIN] },
     { id: 'cart', label: 'Cart', icon: ShoppingCart, roles: [Role.BUYER], count: cart.length },
-    { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER] },
+    { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER, Role.BUYER] },
     { id: 'feedback', label: 'Feedback', icon: MessageSquare, roles: [Role.ADMIN, Role.SELLER, Role.BUYER] },
   ];
 
@@ -2080,7 +2153,12 @@ export default function App() {
               </span>
             </div>
             
-            <IconButton icon={Bell} variant="ghost" badge={notifications.length || undefined} />
+            <IconButton
+              icon={Bell}
+              variant="ghost"
+              badge={notifications.length || undefined}
+              onClick={() => setActiveTab('notifications')}
+            />
             <IconButton icon={Settings} variant="ghost" />
             
             <div className="header-user">
@@ -2106,7 +2184,7 @@ export default function App() {
               {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} getRemainingTime={getRemainingTime} />}
               {activeTab === 'preorders' && <PreOrderView meals={meals} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} />}
               {activeTab === 'cart' && <CartView cart={cart} setActiveTab={setActiveTab} removeFromCart={removeFromCart} handleCheckout={handleCheckout} isProcessingPayment={isProcessingPayment} />}
-              {activeTab === 'notifications' && <NotificationsView notifications={notifications} fetchData={fetchData} />}
+              {activeTab === 'notifications' && <NotificationsView notifications={notifications} fetchData={fetchData} user={user} />}
               {activeTab === 'feedback' && <FeedbackView feedbacks={feedbacks} meals={meals} user={user} fetchData={fetchData} />}
             </motion.div>
           </AnimatePresence>

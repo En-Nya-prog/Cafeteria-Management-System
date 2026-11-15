@@ -34,6 +34,20 @@ The Express API is exported from `api/[...path].js` as a Vercel Function so API 
 7. Create Seller accounts from the admin UI and add menu items through **Inventory**. Sellers manage only their own items, while administrators can manage the full menu. The menu starts empty; local CSV data and uploaded images are not automatically deployed.
 8. This Hobby deployment is for preview/testing only. Campus production requires a suitable paid Vercel plan, a production database plan, live Paystack credentials, backups, webhook checks, session/admin recovery, and a low-value payment/refund rehearsal. Review provider usage limits and pricing before launch.
 
+### New meal announcements
+
+Every existing Buyer account receives an in-app notification when a new meal is listed. Buyers can opt in to email and/or SMS from **Notifications**; SMS requires an international-format number such as `+233241234567`. Buyers can change their choices at any time. Add these server-only variables to Vercel to enable external delivery:
+
+| Variable | Purpose |
+|---|---|
+| `RESEND_API_KEY` | Resend API key |
+| `RESEND_FROM_EMAIL` | Verified sender address, such as `E³ Cafeteria <menu@your-verified-domain>` |
+| `HUBTEL_CLIENT_ID` | Hubtel SMS API client ID |
+| `HUBTEL_CLIENT_SECRET` | Hubtel SMS API client secret |
+| `HUBTEL_SENDER_ID` | Sender ID approved for the Hubtel account |
+
+If a provider is not configured or rejects a message, the meal remains listed and the in-app alert is still created. Failed external deliveries are logged by the API; check the Vercel function logs and provider account before enabling buyer opt-in.
+
 #### Importing `products.csv` and local images
 
 The migration command deduplicates identical meal rows, copies referenced `/uploads/...` files to public Vercel Blob storage, and imports meals without replacing any existing meal IDs. It preserves image URLs that are already absolute URLs. If any meal IDs already exist in PostgreSQL, the command stops before uploading images or importing meals.

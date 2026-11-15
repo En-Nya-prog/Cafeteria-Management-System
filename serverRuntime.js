@@ -15,6 +15,7 @@ import {
   isVerifiedPaystackPayment,
   verifyPaystackSignature,
 } from "./lib/payments.js";
+import { sendMealEmail, sendMealSms } from "./lib/mealNotifications.js";
 
 const uploadsDir = path.resolve(process.env.UPLOADS_DIR || "uploads");
 const isVercel = Boolean(process.env.VERCEL);
@@ -234,6 +235,17 @@ export async function createApp(expressFramework = express) {
       password TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS user_notifications (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      meal_id TEXT,
+      timestamp TEXT NOT NULL,
+      read_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       token_hash TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -272,6 +284,13 @@ export async function createApp(expressFramework = express) {
   for (const table of ["sales", "preorders", "feedback"]) {
     await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS user_id TEXT`);
   }
+  await db.exec(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS meal_email_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS meal_sms_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS user_notifications_user_timestamp_idx
+      ON user_notifications (user_id, timestamp DESC);
+  `);
   await db.exec("ALTER TABLE meals ADD COLUMN IF NOT EXISTS seller_id TEXT REFERENCES users(id) ON DELETE SET NULL");
   await db.exec(`
     CREATE INDEX IF NOT EXISTS payments_reservations_idx ON payments (status, reserved_until);
@@ -744,6 +763,60 @@ export async function createApp(expressFramework = express) {
   const isStaff = requireRoles([ADMIN_ROLE, SELLER_ROLE]);
   const isBuyer = requireRoles([CUSTOMER_ROLE]);
 
+  const notifyBuyersOfNewMeal = async (meal, appUrl) => {
+    const buyers = await db.prepare(`
+      SELECT id, email, phone, meal_email_opt_in, meal_sms_opt_in
+      FROM users
+      WHERE role = ?
+    `).all(CUSTOMER_ROLE);
+    const timestamp = new Date().toISOString();
+    const title = "New meal available";
+    const message = `${meal.name} is now available for GHS ${Number(meal.price).toFixed(2)}.`;
+
+    for (let offset = 0; offset < buyers.length; offset += 500) {
+      const batch = buyers.slice(offset, offset + 500);
+      const placeholders = batch.map(() => "(?, ?, ?, ?, ?, ?, ?, ?)").join(", ");
+      const params = batch.flatMap((buyer) => [
+        crypto.randomUUID(),
+        buyer.id,
+        "meal",
+        title,
+        message,
+        meal.id,
+        timestamp,
+        null,
+      ]);
+      await db.prepare(`
+        INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, timestamp, read_at)
+        VALUES ${placeholders}
+      `).run(...params);
+    }
+
+    const deliverToOptedInBuyers = async (channel, optedInBuyers, send) => {
+      const results = await Promise.allSettled(optedInBuyers.map((buyer) => send(buyer)));
+      let failed = 0;
+      results.forEach((result, index) => {
+        if (result.status !== "rejected") return;
+        failed += 1;
+        console.error(`New meal ${channel} notification failed for buyer ${optedInBuyers[index].id}:`, result.reason);
+      });
+      return { sent: results.length - failed, failed };
+    };
+
+    const emailBuyers = buyers.filter((buyer) => buyer.meal_email_opt_in);
+    const smsBuyers = buyers.filter((buyer) => buyer.meal_sms_opt_in && buyer.phone);
+    const [email, sms] = await Promise.all([
+      deliverToOptedInBuyers("email", emailBuyers, (buyer) =>
+        sendMealEmail({ buyerEmail: buyer.email, meal, appUrl })
+      ),
+      deliverToOptedInBuyers("SMS", smsBuyers, (buyer) =>
+        sendMealSms({ phone: buyer.phone, meal, appUrl })
+      ),
+    ]);
+
+    return { inApp: buyers.length, email, sms };
+  };
+
   const storage = isVercel
     ? multer.memoryStorage()
     : multer.diskStorage({
@@ -843,11 +916,13 @@ export async function createApp(expressFramework = express) {
       return res.status(400).json({ message: "Invalid meal details." });
     }
 
-    if (req.user.role === SELLER_ROLE) {
-      const existingMeal = await db.prepare("SELECT seller_id FROM meals WHERE id = ?").get(id.trim());
-      if (existingMeal && existingMeal.seller_id !== req.user.id) {
-        return res.status(403).json({ message: "You can only manage foods that you added." });
-      }
+    const existingMeal = await db.prepare("SELECT seller_id FROM meals WHERE id = ?").get(id.trim());
+    if (
+      req.user.role === SELLER_ROLE &&
+      existingMeal &&
+      existingMeal.seller_id !== req.user.id
+    ) {
+      return res.status(403).json({ message: "You can only manage foods that you added." });
     }
 
     const savedImageUrl = req.file ? await saveUploadedImage(req.file) : resolvedImageUrl;
@@ -880,7 +955,23 @@ export async function createApp(expressFramework = express) {
       return res.status(403).json({ message: "You can only manage foods that you added." });
     }
     await syncToCsv();
-    res.json({ success: true });
+    let notifications;
+    let notificationError;
+    if (!existingMeal) {
+      try {
+        const appUrl = APP_BASE_URL || `${req.protocol}://${req.get("host")}`;
+        notifications = await notifyBuyersOfNewMeal({
+          id: id.trim(),
+          name: name.trim(),
+          category: category.trim(),
+          price: parsedPrice,
+        }, appUrl);
+      } catch (error) {
+        console.error("New meal in-app notifications could not be created:", error);
+        notificationError = "The meal was saved, but buyer notifications could not be created.";
+      }
+    }
+    res.json({ success: true, notifications, notificationError });
   }));
 
   app.delete("/api/meals/:id", isStaff, asyncHandler(async (req, res) => {
@@ -1120,9 +1211,58 @@ export async function createApp(expressFramework = express) {
     res.json({ success: true });
   }));
 
-  app.get("/api/notifications", isStaff, asyncHandler(async (req, res) => {
+  app.get("/api/notifications", authenticate, asyncHandler(async (req, res) => {
+    if (req.user.role === CUSTOMER_ROLE) {
+      const notifications = await db.prepare(`
+        SELECT id, type, title, message, timestamp, read_at
+        FROM user_notifications
+        WHERE user_id = ?
+        ORDER BY timestamp DESC
+      `).all(req.user.id);
+      return res.json(notifications);
+    }
+    if (![ADMIN_ROLE, SELLER_ROLE].includes(req.user.role)) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
     const notifications = await db.prepare("SELECT * FROM notifications ORDER BY timestamp DESC").all();
     res.json(notifications);
+  }));
+
+  app.get("/api/notification-preferences", isBuyer, asyncHandler(async (req, res) => {
+    const preferences = await db.prepare(`
+      SELECT phone, meal_email_opt_in, meal_sms_opt_in
+      FROM users
+      WHERE id = ?
+    `).get(req.user.id);
+    res.json({
+      phone: preferences.phone || "",
+      email_opt_in: preferences.meal_email_opt_in,
+      sms_opt_in: preferences.meal_sms_opt_in,
+    });
+  }));
+
+  app.put("/api/notification-preferences", isBuyer, asyncHandler(async (req, res) => {
+    const { phone, email_opt_in, sms_opt_in } = req.body || {};
+    if (
+      typeof phone !== "string" ||
+      typeof email_opt_in !== "boolean" ||
+      typeof sms_opt_in !== "boolean"
+    ) {
+      return res.status(400).json({ message: "Provide a phone number and email/SMS notification choices." });
+    }
+    const normalizedPhone = phone.trim();
+    if (
+      (sms_opt_in && !/^\+[1-9]\d{7,14}$/.test(normalizedPhone)) ||
+      (!sms_opt_in && normalizedPhone && !/^\+[1-9]\d{7,14}$/.test(normalizedPhone))
+    ) {
+      return res.status(400).json({ message: "Enter the phone number in international format, such as +233241234567." });
+    }
+    await db.prepare(`
+      UPDATE users
+      SET phone = ?, meal_email_opt_in = ?, meal_sms_opt_in = ?
+      WHERE id = ?
+    `).run(normalizedPhone || null, email_opt_in, sms_opt_in, req.user.id);
+    res.json({ success: true });
   }));
 
   app.post("/api/notifications", isStaff, asyncHandler(async (req, res) => {
