@@ -21,7 +21,31 @@ The development server creates demo accounts and sample meals only when their re
 
 These credentials are for local development only. Do not expose a development server publicly. Public registration creates Buyer accounts; assign staff roles only through trusted database administration.
 
-## Render deployment
+## Vercel deployment
+
+The Express API is exported from `server.js` for Vercel Functions. Vite builds the client into `public/`, which Vercel serves through its CDN. PostgreSQL and uploaded image storage are separate persistent services; Vercel's function filesystem is not persistent.
+
+1. Import `En-Nya-prog/Cafeteria-Management-System` into Vercel and use the repository root as the project root. Keep the build command as `npm run build` and the output directory as `public` (also set in `vercel.json`).
+2. Create a managed PostgreSQL database and set `DATABASE_URL` in Vercel. Use the provider's pooled connection string where available; use a separate database for Preview deployments rather than sharing production data.
+3. Create a Vercel Blob store and connect it to the project. This supplies `BLOB_READ_WRITE_TOKEN` for public meal images; without it, image uploads return an explicit configuration error.
+4. Set `PAYSTACK_SECRET_KEY`, `EBD_ADMIN_EMAIL`, and a unique `EBD_ADMIN_PASSWORD` in Vercel. Use the Paystack **test** key for Preview and the **live** key for Production. The app rejects mismatched key types.
+5. In Production, set `APP_BASE_URL` to the canonical HTTPS origin, for example `https://cafeteria.example.edu`. Preview deployments use Vercel's deployment URL.
+6. Deploy and confirm `/api/healthz` returns `{"status":"ok"}`. Configure the Paystack webhook as `https://cafeteria.example.edu/api/webhooks/paystack`.
+7. Add meals and staff accounts through the admin UI. The menu starts empty; local CSV data and uploaded images are not automatically deployed.
+8. Before campus-wide use, verify PostgreSQL backups, image retention, Paystack webhook delivery, session/admin recovery, and a low-value live payment/refund rehearsal. Review provider usage limits and pricing for expected campus traffic.
+
+Rate-limit counters are stored in PostgreSQL so they are shared across Vercel Function instances. Enable appropriate Vercel Firewall protections as an additional edge control before public production use.
+
+### Migrating an existing SQLite installation to Vercel
+
+The migration script imports users, meals, sales, pre-orders, feedback, and notifications; it deliberately does not import sessions or payment attempts. Back up the SQLite database and uploaded images, stop writes to the old app, and provision PostgreSQL before deploying.
+
+1. Set `SQLITE_SOURCE_PATH` to the backed-up database file and `DATABASE_URL` to the Vercel PostgreSQL provider's connection string on a trusted migration machine. Keep connection strings in local environment variables; do not commit or share them.
+2. Run `node --experimental-sqlite scripts/migrate-sqlite-to-postgres.js`, then reconcile imported/skipped row counts, users, stock, sales totals, and pre-orders before switching traffic.
+3. Migrate existing images to Blob separately and update meal image URLs in PostgreSQL. The SQLite import script does not copy image files.
+4. Keep the old database and image files untouched until post-cutover checks pass.
+
+## Render deployment (alternative)
 
 The `render.yaml` Blueprint provisions a Render web service, a managed PostgreSQL database, and a persistent disk for uploaded images and the menu CSV. The persistent disk means the web service must run as a **single instance**; scale its instance size rather than adding web instances. PostgreSQL is shared and managed independently.
 

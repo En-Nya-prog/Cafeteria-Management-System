@@ -1,12 +1,13 @@
 import "dotenv/config";
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { fileURLToPath } from "node:url";
 import multer from "multer";
 import { createObjectCsvWriter } from "csv-writer";
+import { put } from "@vercel/blob";
 import pg from "pg";
 import {
   buildPaymentLines,
@@ -15,23 +16,26 @@ import {
 } from "./lib/payments.js";
 
 const uploadsDir = path.resolve(process.env.UPLOADS_DIR || "uploads");
-if (!fs.existsSync(uploadsDir)) {
+const isVercel = Boolean(process.env.VERCEL);
+const isVercelPreview = isVercel && process.env.VERCEL_ENV === "preview";
+if (!isVercel && !fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
 const csvPath = path.resolve(process.env.PRODUCTS_CSV_PATH || "products.csv");
 let activePool;
+let sessionCleanup;
+let rateLimitCleanup;
 
-async function startServer() {
-  const app = express();
-  const PORT = Number(process.env.PORT || 3000);
+export async function createApp(expressFramework = express) {
+  const app = expressFramework();
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL must point to a PostgreSQL database.");
   }
   const pool = activePool = new pg.Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
-    max: 10,
+    max: isVercel ? 1 : 10,
     connectionTimeoutMillis: 10000,
     idleTimeoutMillis: 30000,
   });
@@ -78,14 +82,13 @@ async function startServer() {
   const SESSION_DURATION_MS = 8 * 60 * 60 * 1000;
   const PAYMENT_RESERVATION_MS = 30 * 60 * 1000;
   const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-  const APP_BASE_URL = process.env.APP_BASE_URL;
+  const APP_BASE_URL = process.env.APP_BASE_URL ||
+    (isVercel && process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined);
 
-  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
-    throw new Error("PORT must be a valid TCP port.");
-  }
   if (process.env.NODE_ENV === "production") {
-    if (typeof PAYSTACK_SECRET_KEY !== "string" || !PAYSTACK_SECRET_KEY.startsWith("sk_live_")) {
-      throw new Error("A live PAYSTACK_SECRET_KEY is required in production.");
+    const requiredPaystackPrefix = isVercelPreview ? "sk_test_" : "sk_live_";
+    if (typeof PAYSTACK_SECRET_KEY !== "string" || !PAYSTACK_SECRET_KEY.startsWith(requiredPaystackPrefix)) {
+      throw new Error(`A ${isVercelPreview ? "test" : "live"} PAYSTACK_SECRET_KEY is required in this production environment.`);
     }
     let appUrl;
     try {
@@ -149,7 +152,7 @@ async function startServer() {
     next();
   });
 
-  const csvWriter = createObjectCsvWriter({
+    const csvWriter = isVercel ? null : createObjectCsvWriter({
     path: csvPath,
     header: [
       { id: "id", title: "id" },
@@ -165,6 +168,7 @@ async function startServer() {
   });
 
   const syncToCsv = async () => {
+    if (isVercel) return;
     const meals = await db.prepare("SELECT * FROM meals").all();
     await csvWriter.writeRecords(meals);
   };
@@ -233,6 +237,12 @@ async function startServer() {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      key TEXT PRIMARY KEY,
+      count INTEGER NOT NULL,
+      reset_at BIGINT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS payments (
       reference TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -262,6 +272,7 @@ async function startServer() {
     CREATE INDEX IF NOT EXISTS payments_reservations_idx ON payments (status, reserved_until);
     CREATE INDEX IF NOT EXISTS payment_items_meal_idx ON payment_items (meal_id);
     CREATE INDEX IF NOT EXISTS sessions_expiration_idx ON sessions (expires_at);
+    CREATE INDEX IF NOT EXISTS rate_limits_expiration_idx ON rate_limits (reset_at);
   `);
 
   const userCount = await db.prepare("SELECT COUNT(*) as count FROM users").get();
@@ -414,22 +425,44 @@ async function startServer() {
   app.use(express.json({ limit: "1mb" }));
   app.use("/uploads", express.static(uploadsDir));
 
-  const rateLimits = new Map();
-  const createRateLimit = ({ limit, windowMs, message }) => (req, res, next) => {
+  const asyncHandler = (handler) => (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+  const clearExpiredRateLimits = async () => {
+    await db.prepare("DELETE FROM rate_limits WHERE reset_at <= ?").run(Date.now());
+  };
+  let lastRateLimitCleanup = 0;
+  const createRateLimit = ({ limit, windowMs, message }) => asyncHandler(async (req, res, next) => {
     const now = Date.now();
-    const key = `${req.baseUrl}${req.route?.path || req.path}:${req.user?.id || req.ip}`;
-    const entry = rateLimits.get(key);
-    if (!entry || entry.resetAt <= now) {
-      rateLimits.set(key, { count: 1, resetAt: now + windowMs });
-      return next();
+    if (now - lastRateLimitCleanup >= 15 * 60 * 1000) {
+      await clearExpiredRateLimits();
+      lastRateLimitCleanup = now;
     }
-    if (entry.count >= limit) {
-      res.setHeader("Retry-After", String(Math.ceil((entry.resetAt - now) / 1000)));
+
+    const rateLimitKey = crypto.createHash("sha256")
+      .update(`${req.baseUrl}${req.route?.path || req.path}:${req.user?.id || req.ip}`)
+      .digest("hex");
+    const entry = await db.prepare(`
+      INSERT INTO rate_limits (key, count, reset_at)
+      VALUES (?, 1, ?)
+      ON CONFLICT (key) DO UPDATE SET
+        count = CASE
+          WHEN rate_limits.reset_at <= ? THEN 1
+          ELSE LEAST(rate_limits.count + 1, ?)
+        END,
+        reset_at = CASE
+          WHEN rate_limits.reset_at <= ? THEN ?
+          ELSE rate_limits.reset_at
+        END
+      RETURNING count, reset_at
+    `).get(rateLimitKey, now + windowMs, now, limit + 1, now, now + windowMs);
+
+    if (entry.count > limit) {
+      res.setHeader("Retry-After", String(Math.max(1, Math.ceil((Number(entry.reset_at) - now) / 1000))));
       return res.status(429).json({ message });
     }
-    entry.count += 1;
     next();
-  };
+  });
 
   const loginRateLimit = createRateLimit({
     limit: 10,
@@ -456,18 +489,17 @@ async function startServer() {
     await db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(new Date().toISOString());
   };
   clearExpiredSessions().catch((error) => console.error("Session cleanup failed:", error));
-  const sessionCleanup = setInterval(() => {
-    clearExpiredSessions().catch((error) => console.error("Session cleanup failed:", error));
-  }, 60 * 60 * 1000);
-  sessionCleanup.unref();
+  if (!isVercel) {
+    sessionCleanup = setInterval(() => {
+      clearExpiredSessions().catch((error) => console.error("Session cleanup failed:", error));
+    }, 60 * 60 * 1000);
+    sessionCleanup.unref();
 
-  const rateLimitCleanup = setInterval(() => {
-    const now = Date.now();
-    for (const [key, entry] of rateLimits) {
-      if (entry.resetAt <= now) rateLimits.delete(key);
-    }
-  }, 15 * 60 * 1000);
-  rateLimitCleanup.unref();
+    rateLimitCleanup = setInterval(() => {
+      clearExpiredRateLimits().catch((error) => console.error("Rate limit cleanup failed:", error));
+    }, 15 * 60 * 1000);
+    rateLimitCleanup.unref();
+  }
 
   app.get("/api/healthz", asyncHandler(async (req, res) => {
     try {
@@ -549,9 +581,6 @@ async function startServer() {
     res.setHeader("Set-Cookie", `ebd_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure}`);
   };
 
-  const asyncHandler = (handler) => (req, res, next) => {
-    Promise.resolve(handler(req, res, next)).catch(next);
-  };
   const clientError = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
   const isPositiveInteger = (value) => Number.isSafeInteger(Number(value)) && Number(value) > 0;
   const isTime = (value) => typeof value === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
@@ -704,7 +733,9 @@ async function startServer() {
   const isStaff = requireRoles([ADMIN_ROLE, SELLER_ROLE]);
   const isBuyer = requireRoles([CUSTOMER_ROLE]);
 
-  const storage = multer.diskStorage({
+  const storage = isVercel
+    ? multer.memoryStorage()
+    : multer.diskStorage({
     destination: (req, file, cb) => {
       cb(null, uploadsDir);
     },
@@ -724,6 +755,19 @@ async function startServer() {
       cb(null, true);
     },
   });
+  const saveUploadedImage = async (file) => {
+    if (!isVercel) return `/uploads/${file.filename}`;
+    if (!process.env.BLOB_READ_WRITE_TOKEN) {
+      throw Object.assign(new Error("Image storage is not configured. Connect a Vercel Blob store."), { statusCode: 503 });
+    }
+
+    const extension = { "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp" }[file.mimetype];
+    const blob = await put(`meals/${crypto.randomUUID()}${extension}`, file.buffer, {
+      access: "public",
+      addRandomSuffix: true,
+    });
+    return blob.url;
+  };
 
   app.get("/api/meals", asyncHandler(async (req, res) => {
     const meals = await db.prepare("SELECT * FROM meals").all();
@@ -746,14 +790,14 @@ async function startServer() {
     res.json(lowStock);
   }));
 
-  app.post("/api/upload", isAdmin, upload.single("image"), (req, res) => {
+  app.post("/api/upload", isAdmin, upload.single("image"), asyncHandler(async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    const imageUrl = `/uploads/${req.file.filename}`;
+    const imageUrl = await saveUploadedImage(req.file);
     res.json({ url: imageUrl, imageUrl });
-  });
+  }));
 
   app.post("/api/meals", isAdmin, upload.single("image"), asyncHandler(async (req, res) => {
     const {
@@ -769,9 +813,7 @@ async function startServer() {
       available_end,
     } = req.body;
 
-    const resolvedImageUrl = req.file
-      ? `/uploads/${req.file.filename}`
-      : image_url || imageUrl || null;
+    const resolvedImageUrl = image_url || imageUrl || null;
 
     const parsedPrice = Number(price);
     const parsedStock = Number(stock);
@@ -788,6 +830,7 @@ async function startServer() {
       return res.status(400).json({ message: "Invalid meal details." });
     }
 
+    const savedImageUrl = req.file ? await saveUploadedImage(req.file) : resolvedImageUrl;
     await db.prepare(`
       INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -802,7 +845,7 @@ async function startServer() {
       description || "",
       parsedPrice,
       parsedStock,
-      resolvedImageUrl,
+      savedImageUrl,
       available_start,
       available_end
     );
@@ -1162,26 +1205,32 @@ async function startServer() {
         message: status === 413 ? "Image must be 5 MB or smaller." : "Upload a JPG, PNG, or WebP image.",
       });
     }
-    console.error("Unhandled request error:", error);
-    res.status(500).json({ message: "An unexpected server error occurred." });
+    const statusCode = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode <= 599
+      ? error.statusCode
+      : 500;
+    if (statusCode >= 500) console.error("Unhandled request error:", error);
+    res.status(statusCode).json({
+      message: statusCode === 500 ? "An unexpected server error occurred." : error.message,
+    });
   });
 
   const serveBuiltApp = () => {
-    app.use(express.static("dist"));
+    app.use(express.static("public"));
     app.get("*", (req, res) => {
-      res.sendFile(path.resolve("dist/index.html"));
+      res.sendFile(path.resolve("public/index.html"));
     });
   };
 
   if (process.env.NODE_ENV !== "production") {
     try {
+      const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
         server: { middlewareMode: true },
         appType: "spa",
       });
       app.use(vite.middlewares);
     } catch (error) {
-      const distIndex = path.resolve("dist/index.html");
+      const distIndex = path.resolve("public/index.html");
       if (!fs.existsSync(distIndex)) {
         throw error;
       }
@@ -1189,10 +1238,19 @@ async function startServer() {
       console.warn("Vite dev server unavailable, serving built dist instead.");
       serveBuiltApp();
     }
-  } else {
+  } else if (!isVercel) {
     serveBuiltApp();
   }
 
+  return app;
+}
+
+async function startServer() {
+  const PORT = Number(process.env.PORT || 3000);
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error("PORT must be a valid TCP port.");
+  }
+  const app = await createApp();
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
@@ -1216,14 +1274,16 @@ async function startServer() {
   process.once("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-startServer().catch(async (error) => {
-  console.error("Server startup failed:", error);
-  if (activePool) {
-    try {
-      await activePool.end();
-    } catch (poolError) {
-      console.error("PostgreSQL pool cleanup failed:", poolError);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  startServer().catch(async (error) => {
+    console.error("Server startup failed:", error);
+    if (activePool) {
+      try {
+        await activePool.end();
+      } catch (poolError) {
+        console.error("PostgreSQL pool cleanup failed:", poolError);
+      }
     }
-  }
-  process.exitCode = 1;
-});
+    process.exitCode = 1;
+  });
+}
