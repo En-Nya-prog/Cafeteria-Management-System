@@ -1178,6 +1178,44 @@ export async function createApp(expressFramework = express) {
     });
   }));
 
+  app.post("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
+    const { name, email, password } = req.body || {};
+    if (typeof name !== "string" || typeof email !== "string" || typeof password !== "string") {
+      return res.status(400).json({ message: "Name, email, and temporary password are required." });
+    }
+
+    const trimmedName = name.trim();
+    const trimmedEmail = email.trim().toLowerCase();
+    if (
+      !trimmedName || trimmedName.length > 120 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail) || trimmedEmail.length > 254 ||
+      password.length < 10 || password.length > 128
+    ) {
+      return res.status(400).json({
+        message: "Provide a valid name, email, and temporary password with 10 to 128 characters.",
+      });
+    }
+
+    const sellerId = crypto.randomUUID();
+    const insertedSeller = await db.prepare(`
+      INSERT INTO users (id, name, email, role, password)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (email) DO NOTHING
+      RETURNING id, name, email, role
+    `).get(
+      sellerId,
+      trimmedName,
+      trimmedEmail,
+      SELLER_ROLE,
+      hashPassword(password)
+    );
+    if (!insertedSeller) {
+      return res.status(409).json({ message: "An account with this email already exists." });
+    }
+
+    return res.status(201).json({ success: true, user: insertedSeller });
+  }));
+
   app.post("/api/login", loginRateLimit, asyncHandler(async (req, res) => {
     const { email, password, role } = req.body || {};
 

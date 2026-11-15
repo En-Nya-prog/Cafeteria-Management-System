@@ -69,6 +69,21 @@ export const SyncService = {
     return data.user;
   },
 
+  async createSeller({ name, email, password }) {
+    const res = await fetch(`${API_BASE}/sellers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, password }),
+    });
+
+    if (!res.ok) {
+      throw await readError(res, "Unable to create seller account.");
+    }
+
+    const data = await res.json();
+    return data.user;
+  },
+
   async login({ email, password, role }) {
     const res = await fetch(`${API_BASE}/login`, {
       method: "POST",

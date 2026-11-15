@@ -1514,6 +1514,80 @@ const InventoryView = ({ user, fetchData }) => {
   );
 };
 
+const SellersView = () => {
+  const [formData, setFormData] = useState({ name: "", email: "", password: "" });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    if (isSubmitting) return;
+
+    setIsSubmitting(true);
+    setMessage("");
+    try {
+      const seller = await SyncService.createSeller(formData);
+      setFormData({ name: "", email: "", password: "" });
+      setMessage(`Seller account created for ${seller.name} (${seller.email}). Share the temporary password securely.`);
+    } catch (error) {
+      setMessage(error.message || "Unable to create seller account.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="seller-management-view">
+      <div className="inventory-header">
+        <div>
+          <h1 className="page-title">Seller Accounts</h1>
+          <p className="page-subtitle">Create staff accounts for trusted cafeteria sellers</p>
+        </div>
+      </div>
+
+      <Card className="feedback-form-card">
+        <form onSubmit={handleSubmit} className="feedback-form">
+          <Input
+            label="Seller Name"
+            name="name"
+            autoComplete="name"
+            maxLength={120}
+            value={formData.name}
+            onChange={(event) => setFormData({ ...formData, name: event.target.value })}
+            required
+          />
+          <Input
+            label="Email"
+            name="email"
+            type="email"
+            autoComplete="email"
+            maxLength={254}
+            value={formData.email}
+            onChange={(event) => setFormData({ ...formData, email: event.target.value })}
+            required
+          />
+          <Input
+            label="Temporary Password"
+            name="password"
+            type="password"
+            autoComplete="new-password"
+            minLength={10}
+            maxLength={128}
+            value={formData.password}
+            onChange={(event) => setFormData({ ...formData, password: event.target.value })}
+            required
+          />
+          <p className="page-subtitle">Use at least 10 characters. Share the temporary password with the seller privately.</p>
+          {message && <p role="status" aria-live="polite">{message}</p>}
+          <Button type="submit" disabled={isSubmitting} icon={Users}>
+            {isSubmitting ? "Creating account..." : "Create Seller Account"}
+          </Button>
+        </form>
+      </Card>
+    </div>
+  );
+};
+
 const AuthView = ({ handleLogin, handleRegister }) => {
   const [mode, setMode] = useState('login');
   const [selectedRole, setSelectedRole] = useState(Role.ADMIN);
@@ -1797,7 +1871,7 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
-    if (activeTab === 'inventory' && user?.role !== Role.ADMIN) {
+    if (['inventory', 'sellers'].includes(activeTab) && user?.role !== Role.ADMIN) {
       setActiveTab('dashboard');
     }
   }, [activeTab, user]);
@@ -1897,6 +1971,7 @@ export default function App() {
     { id: 'browse', label: 'Menu', icon: Utensils, roles: [Role.BUYER] },
     { id: 'preorders', label: 'Pre-Orders', icon: Clock, roles: [Role.BUYER] },
     { id: 'inventory', label: 'Inventory', icon: Package, roles: [Role.ADMIN] },
+    { id: 'sellers', label: 'Sellers', icon: Users, roles: [Role.ADMIN] },
     { id: 'cart', label: 'Cart', icon: ShoppingCart, roles: [Role.BUYER], count: cart.length },
     { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'feedback', label: 'Feedback', icon: MessageSquare, roles: [Role.ADMIN, Role.SELLER, Role.BUYER] },
@@ -2013,6 +2088,7 @@ export default function App() {
               {activeTab === 'dashboard' && <DashboardView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
               {activeTab === 'reports' && <ReportsView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
               {activeTab === 'inventory' && user.role === Role.ADMIN && <InventoryView user={user} fetchData={fetchData} />}
+              {activeTab === 'sellers' && user.role === Role.ADMIN && <SellersView />}
               {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} getRemainingTime={getRemainingTime} />}
               {activeTab === 'preorders' && <PreOrderView meals={meals} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} />}
               {activeTab === 'cart' && <CartView cart={cart} setActiveTab={setActiveTab} removeFromCart={removeFromCart} handleCheckout={handleCheckout} isProcessingPayment={isProcessingPayment} />}
