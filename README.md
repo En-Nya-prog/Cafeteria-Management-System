@@ -19,7 +19,7 @@ The development server creates demo accounts and sample meals only when their re
 | Seller | `seller@ebd.com` | `seller123` |
 | Buyer | `student@ebd.com` | `student123` |
 
-These credentials are for local development only. Do not expose a development server publicly. Public registration creates Buyer accounts; assign staff roles only through trusted database administration.
+These credentials are for local development only. Do not expose a development server publicly. Public registration creates Buyer accounts. Administrators can create Seller accounts from the **Sellers** page. Sellers can add, edit, and remove only the foods they created; administrators can manage the full menu.
 
 ## Vercel deployment
 
@@ -31,7 +31,7 @@ The Express API is exported from `api/[...path].js` as a Vercel Function so API 
 4. For this free, non-commercial test deployment, set `PAYSTACK_MODE=test` and use a Paystack **test** `PAYSTACK_SECRET_KEY`. Also set `EBD_ADMIN_EMAIL` and a unique `EBD_ADMIN_PASSWORD`. The app rejects a live key in test mode. Never use this Hobby deployment for real sales or live payments.
 5. Set `APP_BASE_URL` to the HTTPS deployment origin if needed; Vercel's `VERCEL_URL` is used as the default.
 6. Deploy and confirm `/api/healthz` returns `{"status":"ok"}`. If testing webhooks, configure the Paystack test account webhook to `https://<your-vercel-domain>/api/webhooks/paystack`.
-7. Add meals and staff accounts through the admin UI. The menu starts empty; local CSV data and uploaded images are not automatically deployed.
+7. Create Seller accounts from the admin UI and add menu items through **Inventory**. Sellers manage only their own items, while administrators can manage the full menu. The menu starts empty; local CSV data and uploaded images are not automatically deployed.
 8. This Hobby deployment is for preview/testing only. Campus production requires a suitable paid Vercel plan, a production database plan, live Paystack credentials, backups, webhook checks, session/admin recovery, and a low-value payment/refund rehearsal. Review provider usage limits and pricing before launch.
 
 #### Importing `products.csv` and local images

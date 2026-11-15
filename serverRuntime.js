@@ -272,11 +272,13 @@ export async function createApp(expressFramework = express) {
   for (const table of ["sales", "preorders", "feedback"]) {
     await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS user_id TEXT`);
   }
+  await db.exec("ALTER TABLE meals ADD COLUMN IF NOT EXISTS seller_id TEXT REFERENCES users(id) ON DELETE SET NULL");
   await db.exec(`
     CREATE INDEX IF NOT EXISTS payments_reservations_idx ON payments (status, reserved_until);
     CREATE INDEX IF NOT EXISTS payment_items_meal_idx ON payment_items (meal_id);
     CREATE INDEX IF NOT EXISTS sessions_expiration_idx ON sessions (expires_at);
     CREATE INDEX IF NOT EXISTS rate_limits_expiration_idx ON rate_limits (reset_at);
+    CREATE INDEX IF NOT EXISTS meals_seller_id_idx ON meals (seller_id);
   `);
 
   const userCount = await db.prepare("SELECT COUNT(*) as count FROM users").get();
@@ -783,8 +785,10 @@ export async function createApp(expressFramework = express) {
     res.json(meals);
   }));
 
-  app.get("/api/inventory", isAdmin, asyncHandler(async (req, res) => {
-    const inventory = await db.prepare("SELECT * FROM meals").all();
+  app.get("/api/inventory", isStaff, asyncHandler(async (req, res) => {
+    const inventory = req.user.role === SELLER_ROLE
+      ? await db.prepare("SELECT * FROM meals WHERE seller_id = ? ORDER BY name").all(req.user.id)
+      : await db.prepare("SELECT * FROM meals ORDER BY name").all();
     res.json(inventory);
   }));
 
@@ -799,7 +803,7 @@ export async function createApp(expressFramework = express) {
     res.json(lowStock);
   }));
 
-  app.post("/api/upload", isAdmin, upload.single("image"), asyncHandler(async (req, res) => {
+  app.post("/api/upload", isStaff, upload.single("image"), asyncHandler(async (req, res) => {
     if (!req.file) {
       return res.status(400).json({ error: "No file uploaded" });
     }
@@ -808,7 +812,7 @@ export async function createApp(expressFramework = express) {
     res.json({ url: imageUrl, imageUrl });
   }));
 
-  app.post("/api/meals", isAdmin, upload.single("image"), asyncHandler(async (req, res) => {
+  app.post("/api/meals", isStaff, upload.single("image"), asyncHandler(async (req, res) => {
     const {
       id,
       name,
@@ -839,15 +843,25 @@ export async function createApp(expressFramework = express) {
       return res.status(400).json({ message: "Invalid meal details." });
     }
 
+    if (req.user.role === SELLER_ROLE) {
+      const existingMeal = await db.prepare("SELECT seller_id FROM meals WHERE id = ?").get(id.trim());
+      if (existingMeal && existingMeal.seller_id !== req.user.id) {
+        return res.status(403).json({ message: "You can only manage foods that you added." });
+      }
+    }
+
     const savedImageUrl = req.file ? await saveUploadedImage(req.file) : resolvedImageUrl;
-    await db.prepare(`
-      INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    const sellerId = req.user.role === SELLER_ROLE ? req.user.id : null;
+    const savedMeal = await db.prepare(`
+      INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end, seller_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name, category = EXCLUDED.category, description = EXCLUDED.description,
         price = EXCLUDED.price, stock = EXCLUDED.stock, image_url = EXCLUDED.image_url,
         available_start = EXCLUDED.available_start, available_end = EXCLUDED.available_end
-    `).run(
+      WHERE ? = ? OR meals.seller_id = ?
+      RETURNING id
+    `).get(
       id.trim(),
       name.trim(),
       category.trim(),
@@ -856,16 +870,26 @@ export async function createApp(expressFramework = express) {
       parsedStock,
       savedImageUrl,
       available_start,
-      available_end
+      available_end,
+      sellerId,
+      req.user.role,
+      ADMIN_ROLE,
+      req.user.id
     );
+    if (!savedMeal) {
+      return res.status(403).json({ message: "You can only manage foods that you added." });
+    }
     await syncToCsv();
     res.json({ success: true });
   }));
 
-  app.delete("/api/meals/:id", isAdmin, asyncHandler(async (req, res) => {
+  app.delete("/api/meals/:id", isStaff, asyncHandler(async (req, res) => {
     let result;
     try {
-      result = await db.prepare("DELETE FROM meals WHERE id = ?").run(req.params.id);
+      result = await db.prepare(`
+        DELETE FROM meals
+        WHERE id = ? AND (? = ? OR seller_id = ?)
+      `).run(req.params.id, req.user.role, ADMIN_ROLE, req.user.id);
     } catch (error) {
       if (error?.code === "23503") {
         return res.status(409).json({

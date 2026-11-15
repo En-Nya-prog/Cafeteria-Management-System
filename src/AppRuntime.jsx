@@ -1205,7 +1205,7 @@ const InventoryView = ({ user, fetchData }) => {
   };
 
   const loadInventory = async () => {
-    if (user?.role !== Role.ADMIN) {
+    if (![Role.ADMIN, Role.SELLER].includes(user?.role)) {
       setInventory([]);
       setLoadingInventory(false);
       return;
@@ -1297,14 +1297,17 @@ const InventoryView = ({ user, fetchData }) => {
     }
   };
 
-  if (user?.role !== Role.ADMIN) return null;
+  if (![Role.ADMIN, Role.SELLER].includes(user?.role)) return null;
+  const isAdmin = user.role === Role.ADMIN;
 
   return (
     <div className="inventory-view">
       <div className="inventory-header">
         <div>
-          <h1 className="page-title">Inventory Management</h1>
-          <p className="page-subtitle">Manage your menu items and stock levels</p>
+          <h1 className="page-title">{isAdmin ? "Inventory Management" : "My Foods"}</h1>
+          <p className="page-subtitle">
+            {isAdmin ? "Manage all menu items and stock levels" : "Add and manage the foods you offer"}
+          </p>
         </div>
         <Button onClick={openAddMealForm} icon={Plus} size="lg">
           Add New Item
@@ -1871,7 +1874,9 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
-    if (['inventory', 'sellers'].includes(activeTab) && user?.role !== Role.ADMIN) {
+    if (activeTab === 'sellers' && user?.role !== Role.ADMIN) {
+      setActiveTab('dashboard');
+    } else if (activeTab === 'inventory' && ![Role.ADMIN, Role.SELLER].includes(user?.role)) {
       setActiveTab('dashboard');
     }
   }, [activeTab, user]);
@@ -1970,7 +1975,7 @@ export default function App() {
     { id: 'reports', label: 'Analytics', icon: TrendingUp, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'browse', label: 'Menu', icon: Utensils, roles: [Role.BUYER] },
     { id: 'preorders', label: 'Pre-Orders', icon: Clock, roles: [Role.BUYER] },
-    { id: 'inventory', label: 'Inventory', icon: Package, roles: [Role.ADMIN] },
+    { id: 'inventory', label: 'Inventory', icon: Package, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'sellers', label: 'Sellers', icon: Users, roles: [Role.ADMIN] },
     { id: 'cart', label: 'Cart', icon: ShoppingCart, roles: [Role.BUYER], count: cart.length },
     { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER] },
@@ -2087,7 +2092,7 @@ export default function App() {
             >
               {activeTab === 'dashboard' && <DashboardView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
               {activeTab === 'reports' && <ReportsView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
-              {activeTab === 'inventory' && user.role === Role.ADMIN && <InventoryView user={user} fetchData={fetchData} />}
+              {activeTab === 'inventory' && [Role.ADMIN, Role.SELLER].includes(user.role) && <InventoryView user={user} fetchData={fetchData} />}
               {activeTab === 'sellers' && user.role === Role.ADMIN && <SellersView />}
               {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} getRemainingTime={getRemainingTime} />}
               {activeTab === 'preorders' && <PreOrderView meals={meals} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} />}

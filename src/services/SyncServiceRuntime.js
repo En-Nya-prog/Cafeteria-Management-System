@@ -146,7 +146,7 @@ export const SyncService = {
     try {
       const res = await fetch(`${API_BASE}/meals`, buildMealRequest(meal));
       if (!res.ok) {
-        throw new Error("Failed to save meal");
+        throw await readError(res, "Failed to save meal");
       }
       return await res.json().catch(() => ({ success: true }));
     } catch (error) {
@@ -161,7 +161,7 @@ export const SyncService = {
     try {
       const res = await fetch(`${API_BASE}/meals`, buildMealRequest(meal));
       if (!res.ok) {
-        throw new Error("Failed to update meal");
+        throw await readError(res, "Failed to update meal");
       }
       return await res.json().catch(() => ({ success: true }));
     } catch (error) {
