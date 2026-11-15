@@ -1806,7 +1806,10 @@ export default function App() {
   const paymentReturnHandled = useRef(false);
 
   useEffect(() => {
-    SyncService.getSession().then(setUser).catch((error) => {
+    SyncService.getSession().then((sessionUser) => {
+      setUser(sessionUser);
+      if (sessionUser?.role === Role.SELLER) setActiveTab('inventory');
+    }).catch((error) => {
       console.error("Unable to restore session:", error);
     });
   }, []);
@@ -1884,7 +1887,13 @@ export default function App() {
   const handleLogin = async (role, email, password) => {
     const userData = await SyncService.login({ email, password, role });
     setUser(userData);
-    setActiveTab(role === Role.BUYER ? 'browse' : 'dashboard');
+    setActiveTab(
+      userData.role === Role.BUYER
+        ? 'browse'
+        : userData.role === Role.SELLER
+          ? 'inventory'
+          : 'dashboard'
+    );
   };
 
   const handleRegister = async ({ name, email, password }) => {
@@ -1975,7 +1984,7 @@ export default function App() {
     { id: 'reports', label: 'Analytics', icon: TrendingUp, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'browse', label: 'Menu', icon: Utensils, roles: [Role.BUYER] },
     { id: 'preorders', label: 'Pre-Orders', icon: Clock, roles: [Role.BUYER] },
-    { id: 'inventory', label: 'Inventory', icon: Package, roles: [Role.ADMIN, Role.SELLER] },
+    { id: 'inventory', label: user.role === Role.SELLER ? 'My Foods' : 'Inventory', icon: Package, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'sellers', label: 'Sellers', icon: Users, roles: [Role.ADMIN] },
     { id: 'cart', label: 'Cart', icon: ShoppingCart, roles: [Role.BUYER], count: cart.length },
     { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER] },
