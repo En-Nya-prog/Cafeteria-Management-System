@@ -9,6 +9,7 @@ import multer from "multer";
 import { createObjectCsvWriter } from "csv-writer";
 import { put } from "@vercel/blob";
 import pg from "pg";
+import { getTrustedOrigins } from "./lib/requestOrigins.js";
 import {
   buildPaymentLines,
   isVerifiedPaystackPayment,
@@ -395,10 +396,15 @@ export async function createApp(expressFramework = express) {
       return res.status(403).json({ message: "Invalid request origin." });
     }
 
-    const expectedOrigin = APP_BASE_URL
-      ? new URL(APP_BASE_URL).origin
-      : `${req.protocol}://${req.get("host")}`;
-    if (requestOrigin !== expectedOrigin) {
+    const allowedOrigins = getTrustedOrigins({
+      appBaseUrl: APP_BASE_URL,
+      requestOrigin: `${req.protocol}://${req.get("host")}`,
+      vercelUrl: isVercel ? process.env.VERCEL_URL : undefined,
+      vercelProjectProductionUrl: isVercel
+        ? process.env.VERCEL_PROJECT_PRODUCTION_URL
+        : undefined,
+    });
+    if (!allowedOrigins.has(requestOrigin)) {
       return res.status(403).json({ message: "Cross-origin request rejected." });
     }
     next();
