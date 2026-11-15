@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Utensils, 
   ShoppingCart, 
@@ -248,8 +248,6 @@ const getLowStockThreshold = (meal) => {
   const threshold = Number(meal?.lowStockThreshold ?? meal?.minimum_threshold ?? DEFAULT_LOW_STOCK_THRESHOLD);
   return Number.isFinite(threshold) ? threshold : DEFAULT_LOW_STOCK_THRESHOLD;
 };
-const isValidMoMoNumber = (phone) => /^\d{10,15}$/.test(String(phone || "").replace(/\D/g, ""));
-
 // --- Alert Components ---
 
 const LowStockAlert = ({ user, meals }) => {
@@ -692,14 +690,10 @@ const PreOrderView = ({ meals, handlePreOrder, isMealAvailable }) => {
 };
 
 const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProcessingPayment }) => {
-  const [phone, setPhone] = useState("");
   const total = cart.reduce((sum, item) => sum + item.meal.price * item.quantity, 0);
 
   const handlePayment = async () => {
-    const paymentCompleted = await handleCheckout(phone);
-    if (paymentCompleted) {
-      setPhone("");
-    }
+    await handleCheckout();
   };
 
   return (
@@ -788,26 +782,17 @@ const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProces
                 <div className="payment-method-option payment-method-active">
                   <Smartphone size={20} />
                   <div>
-                    <span className="payment-method-name">Mobile Money</span>
-                    <span className="payment-method-desc">Pay with MTN, Vodafone, or AirtelTigo</span>
+                    <span className="payment-method-name">Secure checkout with Paystack</span>
+                    <span className="payment-method-desc">Choose Mobile Money or card on the secure checkout page</span>
                   </div>
                 </div>
               </div>
-
-              <Input 
-                label="MoMo Number"
-                type="tel"
-                placeholder="Enter your mobile money number"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                icon={Smartphone}
-              />
 
               <Button 
                 onClick={handlePayment} 
                 size="lg" 
                 className="cart-checkout-btn"
-                disabled={isProcessingPayment || !phone}
+                disabled={isProcessingPayment}
                 icon={isProcessingPayment ? RefreshCw : CreditCard}
               >
                 {isProcessingPayment ? "Processing..." : `Pay ₵${total.toFixed(2)}`}
@@ -1563,8 +1548,8 @@ const AuthView = ({ handleLogin, handleRegister }) => {
         if (!formData.name || !formData.email || !formData.password) {
           throw new Error('Please fill in your name, email, and password.');
         }
-        if (formData.password.length < 6) {
-          throw new Error('Password must be at least 6 characters long.');
+        if (formData.password.length < 10) {
+          throw new Error('Password must be at least 10 characters long.');
         }
         if (formData.password !== formData.confirmPassword) {
           throw new Error('Passwords do not match.');
@@ -1574,7 +1559,7 @@ const AuthView = ({ handleLogin, handleRegister }) => {
           name: formData.name,
           email: formData.email,
           password: formData.password,
-          role: selectedRole,
+          role: Role.BUYER,
         });
       } else {
         if (!formData.email || !formData.password) {
@@ -1603,48 +1588,53 @@ const AuthView = ({ handleLogin, handleRegister }) => {
           </div>
 
           <div className="login-body">
-            <p className="login-instruction">Select your role to continue</p>
+            {mode === 'login' ? (
+              <>
+                <p className="login-instruction">Select your role to continue</p>
+                <div className="login-buttons">
+                  <button type="button" className={`login-role-btn login-role-admin ${selectedRole === Role.ADMIN ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.ADMIN)}>
+                    <div className="login-role-icon">
+                      <Settings size={24} />
+                    </div>
+                    <div className="login-role-info">
+                      <span className="login-role-name">{getRoleLabel(Role.ADMIN)}</span>
+                      <span className="login-role-desc">Full system access</span>
+                    </div>
+                    <ChevronRight size={20} />
+                  </button>
 
-            <div className="login-buttons">
-              <button type="button" className={`login-role-btn login-role-admin ${selectedRole === Role.ADMIN ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.ADMIN)}>
-                <div className="login-role-icon">
-                  <Settings size={24} />
-                </div>
-                <div className="login-role-info">
-                  <span className="login-role-name">{getRoleLabel(Role.ADMIN)}</span>
-                  <span className="login-role-desc">Full system access</span>
-                </div>
-                <ChevronRight size={20} />
-              </button>
+                  <button type="button" className={`login-role-btn login-role-seller ${selectedRole === Role.SELLER ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.SELLER)}>
+                    <div className="login-role-icon">
+                      <Utensils size={24} />
+                    </div>
+                    <div className="login-role-info">
+                      <span className="login-role-name">{getRoleLabel(Role.SELLER)}</span>
+                      <span className="login-role-desc">Manage orders & sales</span>
+                    </div>
+                    <ChevronRight size={20} />
+                  </button>
 
-              <button type="button" className={`login-role-btn login-role-seller ${selectedRole === Role.SELLER ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.SELLER)}>
-                <div className="login-role-icon">
-                  <Utensils size={24} />
+                  <button type="button" className={`login-role-btn login-role-buyer ${selectedRole === Role.BUYER ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.BUYER)}>
+                    <div className="login-role-icon">
+                      <Users size={24} />
+                    </div>
+                    <div className="login-role-info">
+                      <span className="login-role-name">{getRoleLabel(Role.BUYER)}</span>
+                      <span className="login-role-desc">Browse & order meals</span>
+                    </div>
+                    <ChevronRight size={20} />
+                  </button>
                 </div>
-                <div className="login-role-info">
-                  <span className="login-role-name">{getRoleLabel(Role.SELLER)}</span>
-                  <span className="login-role-desc">Manage orders & sales</span>
-                </div>
-                <ChevronRight size={20} />
-              </button>
-
-              <button type="button" className={`login-role-btn login-role-buyer ${selectedRole === Role.BUYER ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.BUYER)}>
-                <div className="login-role-icon">
-                  <Users size={24} />
-                </div>
-                <div className="login-role-info">
-                  <span className="login-role-name">{getRoleLabel(Role.BUYER)}</span>
-                  <span className="login-role-desc">Browse & order meals</span>
-                </div>
-                <ChevronRight size={20} />
-              </button>
-            </div>
+              </>
+            ) : (
+              <p className="login-instruction">New accounts are created as Student / Faculty accounts.</p>
+            )}
 
             <div className="auth-toggle-row">
               <button type="button" className={`auth-toggle ${mode === 'login' ? 'auth-toggle-active' : ''}`} onClick={() => setMode('login')}>
                 Login
               </button>
-              <button type="button" className={`auth-toggle ${mode === 'register' ? 'auth-toggle-active' : ''}`} onClick={() => setMode('register')}>
+              <button type="button" className={`auth-toggle ${mode === 'register' ? 'auth-toggle-active' : ''}`} onClick={() => { setMode('register'); setSelectedRole(Role.BUYER); }}>
                 Register
               </button>
             </div>
@@ -1734,6 +1724,13 @@ export default function App() {
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const paymentReturnHandled = useRef(false);
+
+  useEffect(() => {
+    SyncService.getSession().then(setUser).catch((error) => {
+      console.error("Unable to restore session:", error);
+    });
+  }, []);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -1762,6 +1759,42 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (!user || paymentReturnHandled.current) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const reference = params.get("reference") || params.get("trxref");
+    const paymentStatus = params.get("payment");
+    if (!reference && paymentStatus !== "cancelled") return;
+
+    paymentReturnHandled.current = true;
+    window.history.replaceState({}, "", window.location.pathname);
+    if (!reference) {
+      alert("Checkout was cancelled. No payment was confirmed.");
+      return;
+    }
+
+    SyncService.verifyPayment(reference)
+      .then(async ({ status }) => {
+        if (status === "paid") {
+          setCart([]);
+          await fetchData();
+          alert("Payment confirmed. Your order has been recorded.");
+        } else if (status === "needs_review") {
+          alert("Payment was received, but the order needs staff review. Please contact the cafeteria.");
+        } else if (status === "pending") {
+          alert("Payment is still processing. Check your orders again shortly.");
+        } else if (status === "expired") {
+          alert("The order reservation expired before payment was confirmed. Please contact the cafeteria.");
+        } else {
+          alert("Payment was not completed. No order was recorded.");
+        }
+      })
+      .catch((error) => {
+        alert(error.message || "Unable to confirm payment. Your order has not been marked paid.");
+      });
+  }, [user]);
+
+  useEffect(() => {
     if (activeTab === 'inventory' && user?.role !== Role.ADMIN) {
       setActiveTab('dashboard');
     }
@@ -1773,13 +1806,19 @@ export default function App() {
     setActiveTab(role === Role.BUYER ? 'browse' : 'dashboard');
   };
 
-  const handleRegister = async ({ name, email, password, role }) => {
-    const userData = await SyncService.register({ name, email, password, role });
+  const handleRegister = async ({ name, email, password }) => {
+    const userData = await SyncService.register({ name, email, password });
     setUser(userData);
-    setActiveTab(role === Role.BUYER ? 'browse' : 'dashboard');
+    setActiveTab(userData.role === Role.BUYER ? 'browse' : 'dashboard');
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await SyncService.logout();
+    } catch (error) {
+      alert(error.message || "Unable to log out. Please try again.");
+      return;
+    }
     setUser(null);
     setCart([]);
   };
@@ -1825,20 +1864,21 @@ export default function App() {
     }
   };
 
-  const handleCheckout = async (phone) => {
+  const handleCheckout = async () => {
     if (cart.length === 0) return false;
-    if (!isValidMoMoNumber(phone)) {
-      alert("Enter a valid MoMo number");
-      return false;
-    }
 
     setIsProcessingPayment(true);
     try {
-      await SyncService.processPayment({ phone, cart, customer_name: user?.name || "Guest" });
-      alert("Payment successful!");
-      setCart([]);
-      await fetchData();
-      return true;
+      const checkout = await SyncService.initializePayment({ cart });
+      const authorizationUrl = new URL(checkout.authorization_url);
+      if (
+        authorizationUrl.protocol !== "https:" ||
+        !["checkout.paystack.com", "paystack.com"].includes(authorizationUrl.hostname)
+      ) {
+        throw new Error("Payment provider returned an invalid checkout address.");
+      }
+      window.location.assign(authorizationUrl.toString());
+      return false;
     } catch (error) {
       alert(error.message || "Payment failed.");
       return false;

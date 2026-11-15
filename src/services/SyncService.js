@@ -1,30 +1,23 @@
 const API_BASE = "/api";
 
-const buildHeaders = (role, extraHeaders = {}) => {
-  if (!role) {
-    return extraHeaders;
-  }
-
-  return {
-    ...extraHeaders,
-    "x-user-role": role,
-  };
-};
-
-const buildMealRequest = (meal, role) => {
+const buildMealRequest = (meal) => {
   if (meal instanceof FormData) {
     return {
       method: "POST",
-      headers: buildHeaders(role),
       body: meal,
     };
   }
 
   return {
     method: "POST",
-    headers: buildHeaders(role, { "Content-Type": "application/json" }),
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(meal),
   };
+};
+
+const readError = async (res, fallback) => {
+  const data = await res.json().catch(() => ({}));
+  return new Error(data.message || fallback);
 };
 
 const serializeMealForOutbox = (meal) => {
@@ -60,11 +53,11 @@ export const SyncService = {
     }
   },
 
-  async register({ name, email, password, role }) {
+  async register({ name, email, password }) {
     const res = await fetch(`${API_BASE}/register`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, email, password, role }),
+      body: JSON.stringify({ name, email, password, role: "Buyer" }),
     });
 
     if (!res.ok) {
@@ -92,11 +85,22 @@ export const SyncService = {
     return data.user;
   },
 
+  async getSession() {
+    const res = await fetch(`${API_BASE}/session`);
+    if (res.status === 401) return null;
+    if (!res.ok) throw await readError(res, "Unable to restore session");
+    const data = await res.json();
+    return data.user;
+  },
+
+  async logout() {
+    const res = await fetch(`${API_BASE}/logout`, { method: "POST" });
+    if (!res.ok) throw await readError(res, "Unable to log out");
+  },
+
   async getInventory(role) {
     try {
-      const res = await fetch(`${API_BASE}/inventory`, {
-        headers: buildHeaders(role),
-      });
+      const res = await fetch(`${API_BASE}/inventory`);
       if (!res.ok) {
         throw new Error("Failed to fetch inventory");
       }
@@ -111,9 +115,7 @@ export const SyncService = {
 
   async getLowStock(role) {
     try {
-      const res = await fetch(`${API_BASE}/inventory/low-stock`, {
-        headers: buildHeaders(role),
-      });
+      const res = await fetch(`${API_BASE}/inventory/low-stock`);
       if (!res.ok) {
         throw new Error("Failed to fetch low stock items");
       }
@@ -127,27 +129,31 @@ export const SyncService = {
 
   async addMeal(meal, role) {
     try {
-      const res = await fetch(`${API_BASE}/meals`, buildMealRequest(meal, role));
+      const res = await fetch(`${API_BASE}/meals`, buildMealRequest(meal));
       if (!res.ok) {
         throw new Error("Failed to save meal");
       }
       return await res.json().catch(() => ({ success: true }));
-    } catch (e) {
-      this.addToOutbox("addMeal", { meal: serializeMealForOutbox(meal), role });
-      throw e;
+    } catch (error) {
+      if (error instanceof TypeError) {
+        this.addToOutbox("addMeal", { meal: serializeMealForOutbox(meal), role });
+      }
+      throw error;
     }
   },
 
   async updateMeal(meal, role) {
     try {
-      const res = await fetch(`${API_BASE}/meals`, buildMealRequest(meal, role));
+      const res = await fetch(`${API_BASE}/meals`, buildMealRequest(meal));
       if (!res.ok) {
         throw new Error("Failed to update meal");
       }
       return await res.json().catch(() => ({ success: true }));
-    } catch (e) {
-      this.addToOutbox("updateMeal", { meal: serializeMealForOutbox(meal), role });
-      throw e;
+    } catch (error) {
+      if (error instanceof TypeError) {
+        this.addToOutbox("updateMeal", { meal: serializeMealForOutbox(meal), role });
+      }
+      throw error;
     }
   },
 
@@ -155,15 +161,16 @@ export const SyncService = {
     try {
       const res = await fetch(`${API_BASE}/meals/${id}`, {
         method: "DELETE",
-        headers: buildHeaders(role),
       });
       if (!res.ok) {
         throw new Error("Failed to delete meal");
       }
       return await res.json().catch(() => ({ success: true }));
-    } catch (e) {
-      this.addToOutbox("deleteMeal", { id, role });
-      throw e;
+    } catch (error) {
+      if (error instanceof TypeError) {
+        this.addToOutbox("deleteMeal", { id, role });
+      }
+      throw error;
     }
   },
 
@@ -178,18 +185,20 @@ export const SyncService = {
 
   async processSale(sale) {
     try {
-      await fetch(`${API_BASE}/sales`, {
+      const res = await fetch(`${API_BASE}/sales`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(sale),
       });
-    } catch (e) {
-      this.addToOutbox("processSale", sale);
+      if (!res.ok) throw await readError(res, "Unable to record sale");
+    } catch (error) {
+      if (error instanceof TypeError) this.addToOutbox("processSale", sale);
+      else throw error;
     }
   },
 
-  async processPayment(payload) {
-    const res = await fetch(`${API_BASE}/pay`, {
+  async initializePayment(payload) {
+    const res = await fetch(`${API_BASE}/payments/initialize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -197,9 +206,17 @@ export const SyncService = {
 
     if (!res.ok) {
       const errorData = await res.json().catch(() => ({}));
-      throw new Error(errorData.message || "Payment failed");
+      throw new Error(errorData.message || "Unable to start checkout");
     }
 
+    return await res.json();
+  },
+
+  async verifyPayment(reference) {
+    const res = await fetch(`${API_BASE}/payments/verify/${encodeURIComponent(reference)}`, {
+      method: "POST",
+    });
+    if (!res.ok) throw await readError(res, "Unable to confirm payment");
     return await res.json();
   },
 
@@ -214,25 +231,29 @@ export const SyncService = {
 
   async createPreOrder(preorder) {
     try {
-      await fetch(`${API_BASE}/preorders`, {
+      const res = await fetch(`${API_BASE}/preorders`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(preorder),
       });
-    } catch (e) {
-      this.addToOutbox("createPreOrder", preorder);
+      if (!res.ok) throw await readError(res, "Unable to create pre-order");
+    } catch (error) {
+      if (error instanceof TypeError) this.addToOutbox("createPreOrder", preorder);
+      else throw error;
     }
   },
 
   async updatePreOrderStatus(id, status) {
     try {
-      await fetch(`${API_BASE}/preorders/${id}`, {
+      const res = await fetch(`${API_BASE}/preorders/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status }),
       });
-    } catch (e) {
-      this.addToOutbox("updatePreOrderStatus", { id, status });
+      if (!res.ok) throw await readError(res, "Unable to update pre-order");
+    } catch (error) {
+      if (error instanceof TypeError) this.addToOutbox("updatePreOrderStatus", { id, status });
+      else throw error;
     }
   },
 
@@ -247,13 +268,15 @@ export const SyncService = {
 
   async submitFeedback(feedback) {
     try {
-      await fetch(`${API_BASE}/feedback`, {
+      const res = await fetch(`${API_BASE}/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(feedback),
       });
-    } catch (e) {
-      this.addToOutbox("submitFeedback", feedback);
+      if (!res.ok) throw await readError(res, "Unable to submit feedback");
+    } catch (error) {
+      if (error instanceof TypeError) this.addToOutbox("submitFeedback", feedback);
+      else throw error;
     }
   },
 
@@ -268,13 +291,15 @@ export const SyncService = {
 
   async sendNotification(notif) {
     try {
-      await fetch(`${API_BASE}/notifications`, {
+      const res = await fetch(`${API_BASE}/notifications`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(notif),
       });
-    } catch (e) {
-      this.addToOutbox("sendNotification", notif);
+      if (!res.ok) throw await readError(res, "Unable to send notification");
+    } catch (error) {
+      if (error instanceof TypeError) this.addToOutbox("sendNotification", notif);
+      else throw error;
     }
   },
 
@@ -310,9 +335,8 @@ export const SyncService = {
     const formData = new FormData();
     formData.append("image", file);
     const res = await fetch(`${API_BASE}/upload`, {
-      method: "POST",
-      headers: buildHeaders(role),
-      body: formData,
+    method: "POST",
+    body: formData,
     });
     if (!res.ok) throw new Error("Upload failed");
     const data = await res.json();
