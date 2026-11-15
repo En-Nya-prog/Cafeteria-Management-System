@@ -863,7 +863,17 @@ export async function createApp(expressFramework = express) {
   }));
 
   app.delete("/api/meals/:id", isAdmin, asyncHandler(async (req, res) => {
-    const result = await db.prepare("DELETE FROM meals WHERE id = ?").run(req.params.id);
+    let result;
+    try {
+      result = await db.prepare("DELETE FROM meals WHERE id = ?").run(req.params.id);
+    } catch (error) {
+      if (error?.code === "23503") {
+        return res.status(409).json({
+          message: "This meal is linked to existing records and cannot be deleted. Keep it and set its stock to 0 instead.",
+        });
+      }
+      throw error;
+    }
     if (result.changes === 0) return res.status(404).json({ message: "Meal not found." });
     await syncToCsv();
     res.json({ success: true });

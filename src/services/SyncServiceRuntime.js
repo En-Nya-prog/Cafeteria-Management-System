@@ -159,11 +159,11 @@ export const SyncService = {
 
   async deleteMeal(id, role) {
     try {
-      const res = await fetch(`${API_BASE}/meals/${id}`, {
+      const res = await fetch(`${API_BASE}/meals/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
       if (!res.ok) {
-        throw new Error("Failed to delete meal");
+        throw await readError(res, "Unable to delete this meal.");
       }
       return await res.json().catch(() => ({ success: true }));
     } catch (error) {
