@@ -43,6 +43,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { CATEGORY_TIMES } from './constants.js';
 import { Role } from './types.js';
 import { SyncService } from './services/SyncServiceRuntime.js';
+import loginIllustration from '../uploads/1774479222772-882267974.png';
 import './App.css';
 
 // --- Components ---
@@ -1689,7 +1690,7 @@ const AuthView = ({ handleLogin, handleRegister }) => {
         <div className="login-illustration">
           <img
             className="login-illustration-image"
-            src="/uploads/1774479222772-882267974.png"
+            src={loginIllustration}
             alt="Freshly prepared cafeteria meal"
           />
           <div className="login-illustration-content">
