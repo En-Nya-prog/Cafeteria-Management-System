@@ -46,6 +46,12 @@ import { SyncService } from './services/SyncServiceRuntime.js';
 import loginIllustration from '../uploads/1774479222772-882267974.png';
 import './App.css';
 
+const handleMealImageError = (event) => {
+  const image = event.currentTarget;
+  image.onerror = null;
+  image.src = loginIllustration;
+};
+
 // --- Components ---
 
 const Button = ({ children, onClick, variant = 'primary', size = 'md', className = '', disabled = false, type = 'button', icon: Icon }) => {
@@ -393,6 +399,7 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
                       src={meal.image_url || "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400"} 
                       alt={meal.name} 
                       className="meal-card-image"
+                      onError={handleMealImageError}
                     />
                     
                     <div className="meal-card-overlay">
@@ -641,6 +648,7 @@ const PreOrderView = ({ meals, handlePreOrder, isMealAvailable }) => {
                 src={meal.image_url || "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400"} 
                 alt={meal.name} 
                 className="meal-card-image"
+                onError={handleMealImageError}
               />
               <div className="meal-card-overlay">
                 <Badge variant="light" size="xs" className="meal-card-category">
@@ -722,7 +730,7 @@ const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProces
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, x: -20 }}
                   >
-                    <img src={item.meal.image_url} alt={item.meal.name} className="cart-item-image" />
+                    <img src={item.meal.image_url || loginIllustration} alt={item.meal.name} className="cart-item-image" onError={handleMealImageError} />
                     <div className="cart-item-details">
                       <h4 className="cart-item-name">{item.meal.name}</h4>
                       <p className="cart-item-meta">
@@ -1320,7 +1328,7 @@ const InventoryView = ({ user, fetchData }) => {
           {inventory.map(meal => (
             <Card key={meal.id} className="inventory-card" hover padding={false}>
               <div className="inventory-card-image-wrapper">
-                <img src={meal.image_url || "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400"} alt={meal.name} className="inventory-card-image" />
+                <img src={meal.image_url || "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400"} alt={meal.name} className="inventory-card-image" onError={handleMealImageError} />
                 <div className="inventory-card-overlay">
                   <Badge variant="light" size="xs">{meal.category}</Badge>
                 </div>
@@ -1905,7 +1913,7 @@ export default function App() {
             </div>
             {!sidebarCollapsed && (
               <div className="sidebar-logo-text">
-                <span className="sidebar-logo-title">EBD</span>
+                <span className="sidebar-logo-title">E<sup>3</sup></span>
                 <span className="sidebar-logo-subtitle">Inventory</span>
               </div>
             )}

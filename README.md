@@ -1,4 +1,4 @@
-# EBD Inventory
+# E³ Inventory
 
 A cafeteria management app for browsing meals, managing inventory, recording sales, placing pre-orders, collecting feedback, and taking online payments. The active runtime is the React/Vite client in `src/AppRuntime.jsx` and the Express/PostgreSQL API in `serverRuntime.js`. TypeScript entry points delegate to these same implementations.
 
@@ -33,6 +33,18 @@ The Express API is exported from `api/[...path].js` as a Vercel Function so API 
 6. Deploy and confirm `/api/healthz` returns `{"status":"ok"}`. If testing webhooks, configure the Paystack test account webhook to `https://<your-vercel-domain>/api/webhooks/paystack`.
 7. Add meals and staff accounts through the admin UI. The menu starts empty; local CSV data and uploaded images are not automatically deployed.
 8. This Hobby deployment is for preview/testing only. Campus production requires a suitable paid Vercel plan, a production database plan, live Paystack credentials, backups, webhook checks, session/admin recovery, and a low-value payment/refund rehearsal. Review provider usage limits and pricing before launch.
+
+#### Importing `products.csv` and local images
+
+The migration command deduplicates identical meal rows, copies referenced `/uploads/...` files to public Vercel Blob storage, and imports meals without replacing any existing meal IDs. It preserves image URLs that are already absolute URLs. If any meal IDs already exist in PostgreSQL, the command stops before uploading images or importing meals.
+
+1. Confirm the production PostgreSQL database is connected to the Vercel project and the app has deployed successfully.
+2. Authenticate and link the repository to the Vercel project with the Vercel CLI. Vercel connects Blob through OIDC; the CLI downloads the short-lived OIDC credentials into the ignored `.env.local` file.
+3. Vercel does not allow secret environment variables to be pulled. In Neon, choose the Node.js connection-string option and replace the `DATABASE_URL` placeholder in the ignored local `.env.migrate` file with the complete one-line `postgresql://...` URL. Do not copy it into chat or commit the file.
+4. Validate the CSV and image files without making remote changes: `npm run migrate:products -- --check`.
+5. Run the read-only database preflight: `npm run migrate:products -- --preflight`. The migration reads the local `.env.migrate` database URL and the Vercel OIDC credentials from `.env.local`. Resolve any existing meal-ID conflicts before continuing.
+6. Back up the production PostgreSQL database. When ready to import, run `npm run migrate:products -- --migrate`.
+7. After verifying the production menu and images, remove `.env.migrate` with `Remove-Item .env.migrate` and confirm the files are available in the deployed app.
 
 Rate-limit counters are stored in PostgreSQL so they are shared across Vercel Function instances. Enable appropriate Vercel Firewall protections as an additional edge control before public production use.
 
