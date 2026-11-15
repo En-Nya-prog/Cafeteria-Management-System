@@ -23,7 +23,7 @@ These credentials are for local development only. Do not expose a development se
 
 ## Vercel deployment
 
-The Express API is exported from `server.js` for Vercel Functions. Vite builds the client into `public/`, which Vercel serves through its CDN. PostgreSQL and uploaded image storage are separate persistent services; Vercel's function filesystem is not persistent.
+The Express API is exported from `api/[...path].js` as a Vercel Function so API routes work alongside the Vite client. Vite builds the client into `public/`, which Vercel serves through its CDN. PostgreSQL and uploaded image storage are separate persistent services; Vercel's function filesystem is not persistent.
 
 1. Import `En-Nya-prog/Cafeteria-Management-System` into Vercel and use the repository root as the project root. Keep the build command as `npm run build` and the output directory as `public` (also set in `vercel.json`).
 2. Create a managed PostgreSQL database and set `DATABASE_URL` in Vercel. Use the provider's pooled connection string where available; use a separate database for Preview deployments rather than sharing production data.
