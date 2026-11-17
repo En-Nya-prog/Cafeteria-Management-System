@@ -1131,6 +1131,46 @@ button {
   width: 100%;
 }
 
+.payment-pending-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin: 0 0 var(--space-5);
+  padding: 0.75rem 1rem;
+  border: 1px solid #f2d38b;
+  border-left: 4px solid #d99612;
+  border-radius: var(--radius-lg);
+  background: #fffaf0;
+}
+
+.payment-pending-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  min-width: 0;
+  color: var(--text-primary);
+}
+
+.payment-pending-copy strong {
+  flex: 0 0 auto;
+  font-size: 0.9rem;
+}
+
+.payment-pending-copy span {
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 700px) {
+  .payment-pending-notice,
+  .payment-pending-copy {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
 /* ============================================
    PAGE HEADERS
    ============================================ */

@@ -2621,15 +2621,13 @@ export default function App() {
 
         <div className="main-body">
           {user.role === Role.BUYER && pendingPaymentReference && (
-            <Card className="feedback-form-card" style={{ margin: "var(--space-4) var(--space-6) 0" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-4)", flexWrap: "wrap" }}>
-                <div>
-                  <strong>Payment confirmation is pending</strong>
-                  <p className="page-subtitle">Reference: {pendingPaymentReference}. Don’t place the payment again while we check the result.</p>
-                </div>
-                <Button variant="outline" size="sm" icon={RefreshCw} onClick={() => window.location.reload()}>Check payment again</Button>
+            <div className="payment-pending-notice" role="status">
+              <div className="payment-pending-copy">
+                <strong>Payment confirmation pending</strong>
+                <span>Reference: {pendingPaymentReference} · Don’t pay again while we verify it.</span>
               </div>
-            </Card>
+              <Button variant="outline" size="sm" icon={RefreshCw} onClick={() => window.location.reload()}>Check again</Button>
+            </div>
           )}
           <AnimatePresence mode="wait">
             <motion.div
