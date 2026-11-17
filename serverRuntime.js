@@ -15,7 +15,13 @@ import {
   isVerifiedPaystackPayment,
   verifyPaystackSignature,
 } from "./lib/payments.js";
-import { sendMealEmail, sendMealSms } from "./lib/mealNotifications.js";
+
+import {
+  sendMealEmail,
+  sendMealSms,
+  sendSellerOrderEmail,
+  sendSellerOrderSms,
+} from "./lib/mealNotifications.js";
 
 const uploadsDir = path.resolve(process.env.UPLOADS_DIR || "uploads");
 const isVercel = Boolean(process.env.VERCEL);
@@ -299,6 +305,19 @@ export async function createApp(expressFramework = express) {
     CREATE INDEX IF NOT EXISTS rate_limits_expiration_idx ON rate_limits (reset_at);
     CREATE INDEX IF NOT EXISTS meals_seller_id_idx ON meals (seller_id);
   `);
+await db.exec(`
+  CREATE TABLE IF NOT EXISTS seller_order_notification_deliveries (
+    reference TEXT NOT NULL REFERENCES payments(reference) ON DELETE CASCADE,
+    seller_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
+    status TEXT NOT NULL DEFAULT 'sending'
+      CHECK (status IN ('sending', 'sent', 'failed')),
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (reference, seller_id, channel)
+  );
+`);
+
+
 
   const userCount = await db.prepare("SELECT COUNT(*) as count FROM users").get();
   if (Number(userCount.count) === 0 && process.env.NODE_ENV !== "production") {
@@ -731,33 +750,247 @@ export async function createApp(expressFramework = express) {
     return "paid";
   });
 
-  const verifyAndFulfillPayment = async (reference) => {
-    if (typeof reference !== "string" || !/^ebd_[a-f0-9-]{36}$/.test(reference)) {
-      throw new Error("Invalid payment reference.");
-    }
-    const payment = await db.prepare("SELECT * FROM payments WHERE reference = ?").get(reference);
-    if (!payment) throw new Error("Payment reference not found.");
-    if (payment.status === "paid" || payment.status === "needs_review") return payment.status;
 
-    const transaction = await paystackRequest(`/transaction/verify/${encodeURIComponent(reference)}`, {
+const notifySellersOfPaidOrder = async (reference) => {
+  try {
+    const payment = await db.prepare(
+      "SELECT user_id FROM payments WHERE reference = ? AND status = 'paid'"
+    ).get(reference);
+
+    if (!payment) return;
+
+    const buyer = await db.prepare(
+      "SELECT name FROM users WHERE id = ?"
+    ).get(payment.user_id);
+
+    if (!buyer) return;
+
+    // Retrieve only meals assigned to actual seller accounts.
+    const orderItems = await db.prepare(`
+      SELECT
+        u.id AS seller_id,
+        u.name AS seller_name,
+        u.email AS seller_email,
+        u.phone AS seller_phone,
+        m.name AS meal_name,
+        pi.quantity,
+        pi.unit_amount
+      FROM payment_items pi
+      JOIN meals m ON m.id = pi.meal_id
+      JOIN users u ON u.id = m.seller_id
+      WHERE pi.reference = ?
+        AND u.role = ?
+      ORDER BY u.id, m.name
+    `).all(reference, SELLER_ROLE);
+
+    const sellers = new Map();
+
+    for (const item of orderItems) {
+      if (!sellers.has(item.seller_id)) {
+        sellers.set(item.seller_id, {
+          id: item.seller_id,
+          name: item.seller_name,
+          email: item.seller_email,
+          phone: item.seller_phone,
+          items: [],
+          totalAmount: 0,
+        });
+      }
+
+      const seller = sellers.get(item.seller_id);
+      const unitPrice = Number(item.unit_amount) / 100;
+
+      seller.items.push({
+        name: item.meal_name,
+        quantity: Number(item.quantity),
+        unitPrice,
+      });
+
+      seller.totalAmount += unitPrice * Number(item.quantity);
+    }
+
+    const appUrl = APP_BASE_URL || "http://localhost:3000";
+    const buyerName = buyer.name || "Customer";
+
+    const deliver = async (seller, channel, send) => {
+      const now = new Date();
+      const timestamp = now.toISOString();
+      const staleBefore = new Date(
+        now.getTime() - 10 * 60 * 1000
+      ).toISOString();
+
+      // Claim this notification. A sent notification cannot be claimed again.
+      const claim = await db.prepare(`
+        INSERT INTO seller_order_notification_deliveries
+          (reference, seller_id, channel, status, updated_at)
+        VALUES (?, ?, ?, 'sending', ?)
+        ON CONFLICT (reference, seller_id, channel)
+        DO UPDATE SET
+          status = 'sending',
+          updated_at = EXCLUDED.updated_at
+        WHERE
+          seller_order_notification_deliveries.status = 'failed'
+          OR (
+            seller_order_notification_deliveries.status = 'sending'
+            AND seller_order_notification_deliveries.updated_at < ?
+          )
+        RETURNING channel
+      `).get(
+        reference,
+        seller.id,
+        channel,
+        timestamp,
+        staleBefore
+      );
+
+      if (!claim) return;
+
+      try {
+        await send();
+
+        await db.prepare(`
+          UPDATE seller_order_notification_deliveries
+          SET status = 'sent', updated_at = ?
+          WHERE reference = ? AND seller_id = ? AND channel = ?
+        `).run(
+          new Date().toISOString(),
+          reference,
+          seller.id,
+          channel
+        );
+      } catch (error) {
+        await db.prepare(`
+          UPDATE seller_order_notification_deliveries
+          SET status = 'failed', updated_at = ?
+          WHERE reference = ? AND seller_id = ? AND channel = ?
+        `).run(
+          new Date().toISOString(),
+          reference,
+          seller.id,
+          channel
+        );
+
+        console.error(
+          `Seller ${channel} notification failed for ${seller.id}:`,
+          error
+        );
+      }
+    };
+
+    for (const seller of sellers.values()) {
+      const tasks = [];
+
+      if (seller.email) {
+        tasks.push(
+          deliver(seller, "email", () =>
+            sendSellerOrderEmail({
+              sellerEmail: seller.email,
+              sellerName: seller.name,
+              buyerName,
+              orderReference: reference,
+              items: seller.items,
+              totalAmount: seller.totalAmount,
+              appUrl,
+            })
+          )
+        );
+      }
+
+      if (seller.phone) {
+        tasks.push(
+          deliver(seller, "sms", () =>
+            sendSellerOrderSms({
+              phone: seller.phone,
+              sellerName: seller.name,
+              buyerName,
+              orderReference: reference,
+              items: seller.items,
+              totalAmount: seller.totalAmount,
+            })
+          )
+        );
+      }
+
+      await Promise.allSettled(tasks);
+    }
+  } catch (error) {
+    console.error("Seller order notifications could not be processed:", error);
+  }
+};
+
+
+
+const verifyAndFulfillPayment = async (reference) => {
+  if (typeof reference !== "string" || !/^ebd_[a-f0-9-]{36}$/.test(reference)) {
+    throw new Error("Invalid payment reference.");
+  }
+
+  const payment = await db.prepare(
+    "SELECT * FROM payments WHERE reference = ?"
+  ).get(reference);
+
+  if (!payment) throw new Error("Payment reference not found.");
+
+  // Payment may already have been fulfilled by the webhook.
+  // Check notification delivery so failed notifications can be retried.
+  if (payment.status === "paid") {
+    await notifySellersOfPaidOrder(reference);
+    return "paid";
+  }
+
+  if (payment.status === "needs_review") return "needs_review";
+
+  const transaction = await paystackRequest(
+    `/transaction/verify/${encodeURIComponent(reference)}`,
+    {
       method: "GET",
       headers: {},
-    });
-    if (transaction.status !== "success") {
-      if (transaction.status === "failed" || transaction.status === "abandoned") {
-        await db.prepare("UPDATE payments SET status = 'failed' WHERE reference = ? AND status = 'pending'")
-          .run(reference);
-        return "failed";
-      }
-      return Date.parse(payment.reserved_until) <= Date.now() ? "expired" : "pending";
+    }
+  );
+
+  if (transaction.status !== "success") {
+    if (
+      transaction.status === "failed" ||
+      transaction.status === "abandoned"
+    ) {
+      await db.prepare(`
+        UPDATE payments
+        SET status = 'failed'
+        WHERE reference = ? AND status = 'pending'
+      `).run(reference);
+
+      return "failed";
     }
 
-    const user = await db.prepare("SELECT email FROM users WHERE id = ?").get(payment.user_id);
-    if (!user || !isVerifiedPaystackPayment(transaction, payment, user.email)) {
-      throw new Error("Payment provider verification did not match this order.");
-    }
-    return fulfillVerifiedPayment(reference);
-  };
+    return Date.parse(payment.reserved_until) <= Date.now()
+      ? "expired"
+      : "pending";
+  }
+
+  const user = await db.prepare(
+    "SELECT email FROM users WHERE id = ?"
+  ).get(payment.user_id);
+
+  if (
+    !user ||
+    !isVerifiedPaystackPayment(transaction, payment, user.email)
+  ) {
+    throw new Error(
+      "Payment provider verification did not match this order."
+    );
+  }
+
+  // Complete the payment transaction first.
+  const status = await fulfillVerifiedPayment(reference);
+
+  // Notify sellers only after successful payment fulfillment.
+  if (status === "paid") {
+    await notifySellersOfPaidOrder(reference);
+  }
+
+  return status;
+};
+
 
   const isAdmin = requireRoles([ADMIN_ROLE]);
   const isStaff = requireRoles([ADMIN_ROLE, SELLER_ROLE]);
