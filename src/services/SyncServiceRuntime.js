@@ -129,14 +129,24 @@ async getSellers() {
     try {
       const res = await fetch(`${API_BASE}/inventory`);
       if (!res.ok) {
-        throw new Error("Failed to fetch inventory");
+        throw await readError(res, "Failed to fetch inventory");
       }
 
       const data = await res.json();
-      console.log("Inventory Data:", data);
       return Array.isArray(data) ? data : [];
     } catch (e) {
-      return [];
+      // The buyer menu endpoint is also the canonical shared meal list. It is
+      // public by design, so sellers can still see admin and peer meals when
+      // the staff inventory request is unavailable or their session expired.
+      try {
+        const res = await fetch(`${API_BASE}/meals`);
+        if (!res.ok) throw await readError(res, "Failed to fetch shared meals");
+        const data = await res.json();
+        return Array.isArray(data) ? data : [];
+      } catch (fallbackError) {
+        console.error("Unable to load shared inventory:", e, fallbackError);
+        return [];
+      }
     }
   },
 

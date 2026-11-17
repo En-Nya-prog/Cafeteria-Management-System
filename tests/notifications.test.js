@@ -2,6 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SyncService } from "../src/services/SyncServiceRuntime.js";
 
+test("shared inventory falls back to the canonical meal list for seller visibility", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  const meals = [{ id: "admin-meal", name: "Shared lunch", seller_id: null }];
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(url);
+    if (url === "/api/inventory") return { ok: false, status: 401, json: async () => ({ message: "Authentication required" }) };
+    return { ok: true, json: async () => meals };
+  };
+
+  try {
+    assert.deepEqual(await SyncService.getInventory("Seller"), meals);
+    assert.deepEqual(requestedUrls, ["/api/inventory", "/api/meals"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("markNotificationAsRead sends POST with notification id", async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl;
