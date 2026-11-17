@@ -294,6 +294,15 @@ export async function createApp(expressFramework = express) {
     await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS user_id TEXT`);
   }
   await db.exec(`
+    ALTER TABLE sales ADD COLUMN IF NOT EXISTS reference TEXT;
+    ALTER TABLE sales ADD COLUMN IF NOT EXISTS order_status TEXT NOT NULL DEFAULT 'new';
+    ALTER TABLE preorders ADD COLUMN IF NOT EXISTS seller_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+    ALTER TABLE preorders ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'unpaid';
+    ALTER TABLE user_notifications ADD COLUMN IF NOT EXISTS related_id TEXT;
+    CREATE INDEX IF NOT EXISTS sales_reference_idx ON sales (reference);
+    CREATE INDEX IF NOT EXISTS preorders_seller_idx ON preorders (seller_id, timestamp DESC);
+  `);
+  await db.exec(`
     ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS meal_email_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS meal_sms_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
@@ -301,6 +310,7 @@ export async function createApp(expressFramework = express) {
       ON user_notifications (user_id, timestamp DESC);
   `);
   await db.exec("ALTER TABLE meals ADD COLUMN IF NOT EXISTS seller_id TEXT REFERENCES users(id) ON DELETE SET NULL");
+  await db.exec("ALTER TABLE meals ADD COLUMN IF NOT EXISTS availability_status TEXT NOT NULL DEFAULT 'available'");
   await db.exec(`
     CREATE INDEX IF NOT EXISTS payments_reservations_idx ON payments (status, reserved_until);
     CREATE INDEX IF NOT EXISTS payment_items_meal_idx ON payment_items (meal_id);
@@ -318,7 +328,19 @@ await db.exec(`
     updated_at TEXT NOT NULL,
     PRIMARY KEY (reference, seller_id, channel)
   );
+
+    CREATE TABLE IF NOT EXISTS order_assignments (
+      id TEXT PRIMARY KEY,
+      sale_id TEXT NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
+      seller_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'new'
+        CHECK (status IN ('new','accepted','preparing','ready','completed','cancelled')),
+      assigned_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(sale_id)
+    );
 `);
+await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NULL");
 
 
 
@@ -716,26 +738,49 @@ await db.exec(`
     }
 
     const saleStatement = db.prepare(`
-      INSERT INTO sales (id, meal_id, quantity, total_price, customer_name, timestamp, user_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sales (id, meal_id, quantity, total_price, customer_name, timestamp, user_id, reference, order_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new')
     `);
     const preorderStatement = db.prepare(`
       INSERT INTO preorders (id, customer_name, meal_id, quantity, pickup_time, status, timestamp, user_id)
       VALUES (?, ?, ?, ?, ?, 'Pending', ?, ?)
     `);
     for (const item of items) {
+      const saleId = crypto.randomUUID();
+      const meal = await db.prepare("SELECT seller_id, name FROM meals WHERE id = ?").get(item.meal_id);
       await saleStatement.run(
-        crypto.randomUUID(),
+        saleId,
         item.meal_id,
         item.quantity,
         (item.unit_amount * item.quantity) / 100,
         user.name,
         now,
-        payment.user_id
+        payment.user_id,
+        reference
       );
+      await db.prepare(`
+        INSERT INTO order_assignments (id, sale_id, seller_id, status, assigned_at, updated_at)
+        VALUES (?, ?, ?, 'new', ?, ?)
+        ON CONFLICT (sale_id) DO NOTHING
+      `).run(crypto.randomUUID(), saleId, meal?.seller_id || null, now, now);
+      if (meal?.seller_id) {
+        await db.prepare(`
+          INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at)
+          VALUES (?, ?, 'order', 'New buyer order', ?, ?, ?, ?, NULL)
+        `).run(crypto.randomUUID(), meal.seller_id, `${meal.name} was ordered (${item.quantity}).`, item.meal_id, saleId, now);
+      } else {
+        const sellerAccounts = await db.prepare("SELECT id FROM users WHERE role = ?").all(SELLER_ROLE);
+        for (const seller of sellerAccounts) {
+          await db.prepare(`
+            INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at)
+            VALUES (?, ?, 'order', 'New shared-menu order', ?, ?, ?, ?, NULL)
+          `).run(crypto.randomUUID(), seller.id, `${meal?.name || "A shared menu meal"} was ordered (${item.quantity}); accept it to take responsibility.`, item.meal_id, saleId, now);
+        }
+      }
       if (item.pickup_time) {
+        const preorderId = crypto.randomUUID();
         await preorderStatement.run(
-          crypto.randomUUID(),
+          preorderId,
           user.name,
           item.meal_id,
           item.quantity,
@@ -743,6 +788,15 @@ await db.exec(`
           now,
           payment.user_id
         );
+        await db.prepare("UPDATE preorders SET seller_id = ?, payment_status = 'paid' WHERE id = ?")
+          .run(meal?.seller_id || null, preorderId);
+        const recipients = meal?.seller_id
+          ? [{ id: meal.seller_id }]
+          : await db.prepare("SELECT id FROM users WHERE role = ?").all(SELLER_ROLE);
+        for (const recipient of recipients) {
+          await db.prepare("INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at) VALUES (?, ?, 'preorder', 'New pre-order', ?, ?, ?, ?, NULL)")
+            .run(crypto.randomUUID(), recipient.id, `${meal?.name || "Shared menu meal"} (x${item.quantity}) requested for pickup at ${item.pickup_time}.`, item.meal_id, preorderId, now);
+        }
       }
     }
     for (const [mealId, quantity] of requiredByMeal) {
@@ -1098,9 +1152,7 @@ const verifyAndFulfillPayment = async (reference) => {
   }));
 
   app.get("/api/inventory", isStaff, asyncHandler(async (req, res) => {
-    const inventory = req.user.role === SELLER_ROLE
-      ? await db.prepare("SELECT * FROM meals WHERE seller_id = ? ORDER BY name").all(req.user.id)
-      : await db.prepare("SELECT * FROM meals ORDER BY name").all();
+    const inventory = await db.prepare("SELECT * FROM meals ORDER BY name").all();
     res.json(inventory);
   }));
 
@@ -1136,18 +1188,21 @@ const verifyAndFulfillPayment = async (reference) => {
       imageUrl,
       available_start,
       available_end,
+      availability_status,
     } = req.body;
 
     const resolvedImageUrl = image_url || imageUrl || null;
 
     const parsedPrice = Number(price);
     const parsedStock = Number(stock);
+    const normalizedAvailability = availability_status || "available";
     if (
       typeof id !== "string" || !id.trim() ||
       typeof name !== "string" || !name.trim() || name.length > 120 ||
       typeof category !== "string" || !category.trim() || category.length > 80 ||
       !Number.isFinite(parsedPrice) || parsedPrice < 0 ||
       !Number.isSafeInteger(parsedStock) || parsedStock < 0 ||
+      !["available", "unavailable", "sold_out"].includes(normalizedAvailability) ||
       !isTime(available_start) || !isTime(available_end) ||
       (description != null && (typeof description !== "string" || description.length > 2000)) ||
       (resolvedImageUrl != null && (typeof resolvedImageUrl !== "string" || resolvedImageUrl.length > 2048))
@@ -1167,12 +1222,13 @@ const verifyAndFulfillPayment = async (reference) => {
     const savedImageUrl = req.file ? await saveUploadedImage(req.file) : resolvedImageUrl;
     const sellerId = req.user.role === SELLER_ROLE ? req.user.id : null;
     const savedMeal = await db.prepare(`
-      INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end, seller_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end, seller_id, availability_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name, category = EXCLUDED.category, description = EXCLUDED.description,
         price = EXCLUDED.price, stock = EXCLUDED.stock, image_url = EXCLUDED.image_url,
-        available_start = EXCLUDED.available_start, available_end = EXCLUDED.available_end
+        available_start = EXCLUDED.available_start, available_end = EXCLUDED.available_end,
+        availability_status = EXCLUDED.availability_status
       WHERE ? = ? OR meals.seller_id = ?
       RETURNING id
     `).get(
@@ -1186,6 +1242,7 @@ const verifyAndFulfillPayment = async (reference) => {
       available_start,
       available_end,
       sellerId,
+      normalizedAvailability,
       req.user.role,
       ADMIN_ROLE,
       req.user.id
@@ -1232,8 +1289,78 @@ const verifyAndFulfillPayment = async (reference) => {
   }));
 
   app.get("/api/sales", isStaff, asyncHandler(async (req, res) => {
-    const sales = await db.prepare("SELECT * FROM sales ORDER BY timestamp DESC").all();
+    const sales = req.user.role === SELLER_ROLE
+      ? await db.prepare(`
+        SELECT s.*, m.name AS meal_name, m.image_url, m.seller_id AS meal_seller_id,
+          a.seller_id AS assigned_seller_id, a.status AS assignment_status,
+          p.status AS payment_status, p.reference AS order_reference
+        FROM sales s JOIN meals m ON m.id = s.meal_id
+        LEFT JOIN order_assignments a ON a.sale_id = s.id
+        LEFT JOIN payments p ON p.reference = s.reference
+        WHERE m.seller_id = ? OR (m.seller_id IS NULL AND (a.seller_id IS NULL OR a.seller_id = ?))
+        ORDER BY s.timestamp DESC
+      `).all(req.user.id, req.user.id)
+      : await db.prepare(`
+        SELECT s.*, m.name AS meal_name, a.seller_id AS assigned_seller_id,
+          a.status AS assignment_status, p.status AS payment_status, p.reference AS order_reference
+        FROM sales s LEFT JOIN meals m ON m.id = s.meal_id
+        LEFT JOIN order_assignments a ON a.sale_id = s.id
+        LEFT JOIN payments p ON p.reference = s.reference
+        ORDER BY s.timestamp DESC
+      `).all();
     res.json(sales);
+  }));
+
+  app.get("/api/my-orders", isBuyer, asyncHandler(async (req, res) => {
+    const orders = await db.prepare(`
+      SELECT s.id, s.meal_id, m.name AS meal_name, s.quantity, s.total_price, s.timestamp,
+        s.order_status, a.status AS assignment_status, p.status AS payment_status, p.reference AS order_reference
+      FROM sales s JOIN meals m ON m.id = s.meal_id
+      LEFT JOIN order_assignments a ON a.sale_id = s.id
+      LEFT JOIN payments p ON p.reference = s.reference
+      WHERE s.user_id = ? ORDER BY s.timestamp DESC
+    `).all(req.user.id);
+    res.json(orders);
+  }));
+
+  app.patch("/api/sales/:id/status", isStaff, asyncHandler(async (req, res) => {
+    const status = String(req.body?.status || "").toLowerCase();
+    const allowed = ["accepted", "preparing", "ready", "completed", "cancelled"];
+    if (!allowed.includes(status)) return res.status(400).json({ message: "Invalid order status." });
+    const update = db.transaction(async () => {
+      const sale = await db.prepare(`
+        SELECT s.*, m.name AS meal_name, m.seller_id AS meal_seller_id, p.status AS payment_status
+        FROM sales s JOIN meals m ON m.id = s.meal_id
+        LEFT JOIN payments p ON p.reference = s.reference
+        WHERE s.id = ? FOR UPDATE
+      `).get(req.params.id);
+      if (!sale) throw clientError("Order not found.", 404);
+      if (sale.payment_status && sale.payment_status !== "paid") throw clientError("Only paid orders can be processed.", 409);
+      let assignment = await db.prepare("SELECT * FROM order_assignments WHERE sale_id = ? FOR UPDATE").get(sale.id);
+      if (!assignment) {
+        await db.prepare(`INSERT INTO order_assignments (id, sale_id, seller_id, status, assigned_at, updated_at) VALUES (?, ?, ?, 'new', ?, ?)`)
+          .run(crypto.randomUUID(), sale.id, sale.meal_seller_id || null, new Date().toISOString(), new Date().toISOString());
+        assignment = await db.prepare("SELECT * FROM order_assignments WHERE sale_id = ? FOR UPDATE").get(sale.id);
+      }
+      if (req.user.role === SELLER_ROLE) {
+        if (sale.meal_seller_id && sale.meal_seller_id !== req.user.id) throw clientError("This order belongs to another seller.", 403);
+        if (assignment.seller_id && assignment.seller_id !== req.user.id) throw clientError("Another seller has accepted this shared order.", 409);
+      }
+      if (status !== "accepted" && assignment.status === "new") throw clientError("Accept this order before updating its progress.", 409);
+      const now = new Date().toISOString();
+      const assignedSeller = assignment.seller_id || (req.user.role === SELLER_ROLE ? req.user.id : null);
+      await db.prepare("UPDATE order_assignments SET seller_id = ?, status = ?, updated_at = ? WHERE sale_id = ? AND (seller_id IS NULL OR seller_id = ?)")
+        .run(assignedSeller, status, now, sale.id, req.user.id);
+      await db.prepare("UPDATE sales SET order_status = ? WHERE id = ?").run(status, sale.id);
+      const title = `Order ${status === "ready" ? "ready for pickup" : status}`;
+      const message = `${sale.meal_name} (x${sale.quantity}) — order ${sale.reference || sale.id}.`;
+      if (sale.user_id) await db.prepare(`
+        INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at)
+        VALUES (?, ?, 'order', ?, ?, ?, ?, ?, NULL)
+      `).run(crypto.randomUUID(), sale.user_id, title, message, sale.meal_id, sale.id, now);
+      return { success: true, status, seller_id: assignedSeller };
+    });
+    res.json(await update());
   }));
 
   app.post("/api/sales", isStaff, asyncHandler(async (req, res) => {
@@ -1246,8 +1373,9 @@ const verifyAndFulfillPayment = async (reference) => {
     }
 
     const processSale = db.transaction(async () => {
-      const meal = await db.prepare("SELECT id, price, stock FROM meals WHERE id = ? FOR UPDATE").get(meal_id.trim());
+      const meal = await db.prepare("SELECT id, price, stock, availability_status FROM meals WHERE id = ? FOR UPDATE").get(meal_id.trim());
       if (!meal) throw clientError("Meal not found.", 404);
+      if (meal.availability_status !== "available") throw clientError("This meal is not currently available.", 409);
       const reserved = Number((await db.prepare(`
         SELECT COALESCE(SUM(payment_items.quantity), 0) AS quantity
         FROM payment_items
@@ -1292,7 +1420,7 @@ const verifyAndFulfillPayment = async (reference) => {
         const meals = new Map();
         for (const mealId of requestedMealIds) {
           if (!mealId) continue;
-          const meal = await db.prepare("SELECT id, price, stock FROM meals WHERE id = ? FOR UPDATE").get(mealId);
+          const meal = await db.prepare("SELECT id, price, stock, availability_status FROM meals WHERE id = ? FOR UPDATE").get(mealId);
           if (meal) meals.set(mealId, meal);
         }
         try {
@@ -1315,6 +1443,7 @@ const verifyAndFulfillPayment = async (reference) => {
         }
         for (const [mealId, quantity] of orderQuantityByMeal) {
           const meal = meals.get(mealId);
+          if (meal && meal.availability_status !== "available") throw clientError("One or more meals are not currently available.", 409);
           const reserved = Number((await reservedQuantity.get(mealId, nowIso)).quantity);
           if (!meal || meal.stock < reserved + quantity) {
             throw clientError("There is not enough stock to complete this order.", 409);
@@ -1394,7 +1523,9 @@ const verifyAndFulfillPayment = async (reference) => {
   app.get("/api/preorders", authenticate, asyncHandler(async (req, res) => {
     const preorders = req.user.role === CUSTOMER_ROLE
       ? await db.prepare("SELECT * FROM preorders WHERE user_id = ? ORDER BY timestamp DESC").all(req.user.id)
-      : await db.prepare("SELECT * FROM preorders ORDER BY timestamp DESC").all();
+      : req.user.role === SELLER_ROLE
+        ? await db.prepare("SELECT p.*, m.name AS meal_name, m.seller_id AS meal_seller_id FROM preorders p JOIN meals m ON m.id = p.meal_id WHERE p.seller_id = ? OR (p.seller_id IS NULL AND m.seller_id IS NULL) ORDER BY p.timestamp DESC").all(req.user.id)
+        : await db.prepare("SELECT * FROM preorders ORDER BY timestamp DESC").all();
     res.json(preorders);
   }));
 
@@ -1403,28 +1534,42 @@ const verifyAndFulfillPayment = async (reference) => {
     if (typeof meal_id !== "string" || !meal_id.trim() || !isPositiveInteger(quantity) || !isTime(pickup_time)) {
       return res.status(400).json({ message: "A meal, positive whole-number quantity, and valid pickup time are required." });
     }
-    const meal = await db.prepare("SELECT id FROM meals WHERE id = ?").get(meal_id.trim());
+    const meal = await db.prepare("SELECT id, seller_id, name FROM meals WHERE id = ?").get(meal_id.trim());
     if (!meal) return res.status(404).json({ message: "Meal not found." });
-    await db.prepare("INSERT INTO preorders (id, customer_name, meal_id, quantity, pickup_time, status, timestamp, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(crypto.randomUUID(), req.user.name, meal.id, Number(quantity), pickup_time, "Pending", new Date().toISOString(), req.user.id);
+    const preorderId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await db.prepare("INSERT INTO preorders (id, customer_name, meal_id, quantity, pickup_time, status, timestamp, user_id, seller_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(preorderId, req.user.name, meal.id, Number(quantity), pickup_time, "Pending", now, req.user.id, meal.seller_id || null);
+    const recipients = meal.seller_id ? [{ id: meal.seller_id }] : await db.prepare("SELECT id FROM users WHERE role = ?").all(SELLER_ROLE);
+    for (const recipient of recipients) {
+      await db.prepare("INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at) VALUES (?, ?, 'preorder', 'New pre-order', ?, ?, ?, ?, NULL)")
+        .run(crypto.randomUUID(), recipient.id, `${meal.name} (x${quantity}) requested for pickup at ${pickup_time}.`, meal.id, preorderId, now);
+    }
     res.json({ success: true });
   }));
 
   app.patch("/api/preorders/:id", isStaff, asyncHandler(async (req, res) => {
     const { status } = req.body || {};
-    if (!["Ready", "Collected"].includes(status)) {
-      return res.status(400).json({ message: "Status must be Ready or Collected." });
-    }
-    const expectedStatus = status === "Ready" ? "Pending" : "Ready";
-    const result = await db.prepare("UPDATE preorders SET status = ? WHERE id = ? AND status = ?")
-      .run(status, req.params.id, expectedStatus);
-    if (result.changes === 0) {
-      const preorder = await db.prepare("SELECT id FROM preorders WHERE id = ?").get(req.params.id);
-      return res.status(preorder ? 409 : 404).json({
-        message: preorder ? "Pre-order status has already changed." : "Pre-order not found.",
-      });
-    }
-    res.json({ success: true });
+    const nextStatus = ({ Ready: "Ready", Collected: "Completed" })[status] || status;
+    const transitions = { Pending: ["Accepted", "Rejected", "Ready"], Accepted: ["Preparing", "Cancelled"], Preparing: ["Ready"], Ready: ["Completed", "Collected"] };
+    if (!Object.values(transitions).flat().includes(nextStatus)) return res.status(400).json({ message: "Invalid pre-order status." });
+    const update = db.transaction(async () => {
+      const preorder = await db.prepare("SELECT p.*, m.name AS meal_name, m.seller_id AS owner_id FROM preorders p JOIN meals m ON m.id = p.meal_id WHERE p.id = ? FOR UPDATE").get(req.params.id);
+      if (!preorder) throw clientError("Pre-order not found.", 404);
+      if (req.user.role === SELLER_ROLE) {
+        if (preorder.owner_id && preorder.owner_id !== req.user.id) throw clientError("This pre-order belongs to another seller.", 403);
+        if (preorder.seller_id && preorder.seller_id !== req.user.id) throw clientError("Another seller is handling this pre-order.", 409);
+      }
+      if (!(transitions[preorder.status] || []).includes(nextStatus)) throw clientError("This pre-order status has already changed.", 409);
+      const now = new Date().toISOString();
+      const sellerId = preorder.seller_id || (req.user.role === SELLER_ROLE ? req.user.id : preorder.owner_id);
+      await db.prepare("UPDATE preorders SET status = ?, seller_id = ? WHERE id = ? AND status = ? AND (seller_id IS NULL OR seller_id = ?)")
+        .run(nextStatus, sellerId || null, preorder.id, preorder.status, req.user.id);
+      if (preorder.user_id) await db.prepare("INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at) VALUES (?, ?, 'preorder', ?, ?, ?, ?, ?, NULL)")
+        .run(crypto.randomUUID(), preorder.user_id, `Pre-order ${nextStatus.toLowerCase()}`, `${preorder.meal_name} (x${preorder.quantity}) for ${preorder.pickup_time} is ${nextStatus.toLowerCase()}.`, preorder.meal_id, preorder.id, now);
+      return { success: true, status: nextStatus };
+    });
+    res.json(await update());
   }));
 
   app.get("/api/feedback", authenticate, asyncHandler(async (req, res) => {
@@ -1458,6 +1603,13 @@ const verifyAndFulfillPayment = async (reference) => {
       `).all(req.user.id);
       return res.json(notifications);
     }
+    if (req.user.role === SELLER_ROLE) {
+      const notifications = await db.prepare(`
+        SELECT id, type, title, message, meal_id, related_id, timestamp, read_at
+        FROM user_notifications WHERE user_id = ? ORDER BY timestamp DESC
+      `).all(req.user.id);
+      return res.json(notifications);
+    }
     if (![ADMIN_ROLE, SELLER_ROLE].includes(req.user.role)) {
       return res.status(403).json({ message: "Forbidden" });
     }
@@ -1473,14 +1625,14 @@ const verifyAndFulfillPayment = async (reference) => {
       await db.prepare(`
         UPDATE user_notifications
         SET read_at = ?
-        WHERE (id::text = ?::text OR id = ?)
-      `).run(readAt, String(id).trim(), String(id).trim());
+        WHERE (id::text = ?::text OR id = ?) AND user_id = ?
+      `).run(readAt, String(id).trim(), String(id).trim(), req.user.id);
     } else {
       await db.prepare(`
         UPDATE user_notifications
         SET read_at = ?
-        WHERE (user_id::text = ?::text OR user_id = ?)
-      `).run(readAt, String(req.user.id), String(req.user.id));
+        WHERE user_id = ?
+      `).run(readAt, req.user.id);
     }
 
     res.json({ success: true, readAt });
@@ -1493,8 +1645,8 @@ const verifyAndFulfillPayment = async (reference) => {
     await db.prepare(`
       UPDATE user_notifications
       SET read_at = ?
-      WHERE (id::text = ?::text OR id = ?)
-    `).run(readAt, id, id);
+      WHERE (id::text = ?::text OR id = ?) AND user_id = ?
+    `).run(readAt, id, id, req.user.id);
 
     res.json({ success: true, readAt });
   }));

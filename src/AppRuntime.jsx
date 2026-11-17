@@ -826,13 +826,13 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
   }, [user?.role]);
 
   const unreadCount = useMemo(() => {
-    return user?.role === Role.BUYER
+    return [Role.BUYER, Role.SELLER].includes(user?.role)
       ? notifications.filter((n) => !n.read_at).length
       : 0;
   }, [notifications, user?.role]);
 
   const handleNotificationClick = async (notification) => {
-    if (!notification || notification.read_at || user?.role !== Role.BUYER) {
+    if (!notification || notification.read_at || ![Role.BUYER, Role.SELLER].includes(user?.role)) {
       return;
     }
 
@@ -863,7 +863,7 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
   };
 
   const handleMarkAllAsRead = async () => {
-    if (user?.role !== Role.BUYER || unreadCount === 0) return;
+    if (![Role.BUYER, Role.SELLER].includes(user?.role) || unreadCount === 0) return;
 
     const readAt = new Date().toISOString();
     const userKey = user?.id ? `read_notifications_${user.id}` : "read_notifications";
@@ -914,7 +914,7 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
           <p className="page-subtitle">Stay updated with your orders and alerts</p>
         </div>
         <div className="notifications-header-actions" style={{ display: 'flex', gap: 'var(--space-2)' }}>
-          {user?.role === Role.BUYER && unreadCount > 0 && (
+          {[Role.BUYER, Role.SELLER].includes(user?.role) && unreadCount > 0 && (
             <Button
               variant="outline"
               size="sm"
@@ -1156,10 +1156,77 @@ const FeedbackView = ({ feedbacks, meals, user, fetchData }) => {
   );
 };
 
+const OrdersView = ({ sales, meals, fetchData }) => {
+  const [saving, setSaving] = useState(null);
+  const statusLabel = (value) => ({ new: "New Order", accepted: "Accepted", preparing: "Preparing", ready: "Ready for Pickup", completed: "Completed", cancelled: "Cancelled" }[value] || value || "New Order");
+  const advance = async (sale, status) => {
+    setSaving(sale.id);
+    try { await SyncService.updateOrderStatus(sale.id, status); await fetchData(); }
+    catch (error) { alert(error.message || "Unable to update order."); }
+    finally { setSaving(null); }
+  };
+  const actions = (sale) => {
+    const status = sale.assignment_status || sale.order_status || "new";
+    if (status === "new") return <Button size="xs" disabled={saving === sale.id} onClick={() => advance(sale, "accepted")}>Accept</Button>;
+    if (status === "accepted") return <Button size="xs" disabled={saving === sale.id} onClick={() => advance(sale, "preparing")}>Start Preparing</Button>;
+    if (status === "preparing") return <Button size="xs" disabled={saving === sale.id} onClick={() => advance(sale, "ready")}>Ready for Pickup</Button>;
+    if (status === "ready") return <Button size="xs" disabled={saving === sale.id} onClick={() => advance(sale, "completed")}>Complete</Button>;
+    return null;
+  };
+  return <div className="dashboard-view">
+    <div className="dashboard-header"><div><h1 className="page-title">Orders</h1><p className="page-subtitle">Orders for your meals and the shared cafeteria menu</p></div><Button variant="outline" size="sm" icon={RefreshCw} onClick={fetchData}>Refresh</Button></div>
+    <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Order reference</th><th>Meal</th><th>Buyer</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Status</th><th>Action</th></tr></thead><tbody>
+      {sales.map((sale) => <tr key={sale.id}><td>{sale.order_reference || sale.id.slice(0, 8)}</td><td>{sale.meal_name || meals.find((m) => m.id === sale.meal_id)?.name || "Meal"}</td><td>{sale.customer_name || "Buyer"}</td><td>{sale.quantity}</td><td>₵{Number(sale.total_price || 0).toFixed(2)}</td><td><Badge variant={sale.payment_status === "paid" ? "success" : "warning"}>{sale.payment_status || "Recorded"}</Badge></td><td><Badge variant={sale.assignment_status === "ready" ? "success" : "default"}>{statusLabel(sale.assignment_status || sale.order_status)}</Badge></td><td>{actions(sale)}</td></tr>)}
+      {sales.length === 0 && <tr><td colSpan="8">No orders yet.</td></tr>}
+    </tbody></table></div></Card>
+  </div>;
+};
+
+const BuyerOrdersView = () => {
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const refresh = async () => {
+    try { setOrders(await SyncService.getMyOrders()); }
+    catch (error) { console.error("Unable to load buyer orders:", error); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { refresh(); const timer = setInterval(refresh, 5000); return () => clearInterval(timer); }, []);
+  const label = (value) => ({ new: "New Order", accepted: "Accepted", preparing: "Preparing", ready: "Ready for Pickup", completed: "Completed", cancelled: "Cancelled" }[value] || "New Order");
+  return <div className="dashboard-view"><div className="dashboard-header"><div><h1 className="page-title">My Orders</h1><p className="page-subtitle">Track your recent orders and pickup readiness</p></div><Button variant="outline" size="sm" icon={RefreshCw} onClick={refresh}>Refresh</Button></div>
+    <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Reference</th><th>Meal</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Status</th><th>Ordered</th></tr></thead><tbody>
+      {orders.map((order) => <tr key={order.id}><td>{order.order_reference || order.id.slice(0, 8)}</td><td>{order.meal_name}</td><td>{order.quantity}</td><td>₵{Number(order.total_price || 0).toFixed(2)}</td><td>{order.payment_status || "Recorded"}</td><td><Badge variant={order.assignment_status === "ready" ? "success" : "default"}>{label(order.assignment_status || order.order_status)}</Badge></td><td>{new Date(order.timestamp).toLocaleString()}</td></tr>)}
+      {!loading && orders.length === 0 && <tr><td colSpan="7">You have no orders yet.</td></tr>}
+      {loading && <tr><td colSpan="7">Loading orders…</td></tr>}
+    </tbody></table></div></Card>
+  </div>;
+};
+
+const SellerPreOrdersView = ({ preorders, meals, fetchData }) => {
+  const [saving, setSaving] = useState(null);
+  const change = async (item, status) => {
+    setSaving(item.id);
+    try { await SyncService.updatePreOrderStatus(item.id, status); await fetchData(); }
+    catch (error) { alert(error.message || "Unable to update pre-order."); }
+    finally { setSaving(null); }
+  };
+  const actionFor = (item) => {
+    const next = ({ Pending: "Accepted", Accepted: "Preparing", Preparing: "Ready", Ready: "Completed" })[item.status];
+    const label = ({ Pending: "Accept", Accepted: "Start Preparing", Preparing: "Ready for Pickup", Ready: "Complete" })[item.status];
+    return next ? <Button size="xs" disabled={saving === item.id} onClick={() => change(item, next)}>{label}</Button> : null;
+  };
+  return <div className="dashboard-view"><div className="dashboard-header"><div><h1 className="page-title">Pre-Orders</h1><p className="page-subtitle">Future pickup requests for shared and seller meals</p></div><Button variant="outline" size="sm" icon={RefreshCw} onClick={fetchData}>Refresh</Button></div>
+    <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Reference</th><th>Meal</th><th>Buyer</th><th>Qty</th><th>Pickup time</th><th>Payment</th><th>Status</th><th>Action</th></tr></thead><tbody>
+      {preorders.map((item) => <tr key={item.id}><td>{item.id.slice(0, 8)}</td><td>{item.meal_name || meals.find((m) => m.id === item.meal_id)?.name || "Meal"}</td><td>{item.customer_name}</td><td>{item.quantity}</td><td>{item.pickup_time}</td><td>{item.payment_status || "Unpaid"}</td><td><Badge>{item.status}</Badge></td><td>{actionFor(item)}</td></tr>)}
+      {preorders.length === 0 && <tr><td colSpan="8">No pre-orders yet.</td></tr>}
+    </tbody></table></div></Card>
+  </div>;
+};
+
 const DashboardView = ({ sales, meals, preorders, user, fetchData }) => {
   const todaySales = sales.filter(s => new Date(s.timestamp).toDateString() === new Date().toDateString());
   const totalRevenue = todaySales.reduce((acc, s) => acc + s.total_price, 0);
   const pendingPreorders = preorders.filter(p => p.status === 'Pending');
+  const orderStatus = (sale) => sale.assignment_status || sale.order_status || 'new';
   
   const topMeals = useMemo(() => {
     const counts = {};
@@ -1192,6 +1259,12 @@ const DashboardView = ({ sales, meals, preorders, user, fetchData }) => {
       <LowStockAlert user={user} meals={meals} />
 
       <div className="stats-grid">
+        {user?.role === Role.SELLER ? <>
+          <StatCard title="Available Meals" value={meals.filter((meal) => Number(meal.stock) > 0 && (!meal.availability_status || meal.availability_status === "available")).length} icon={Package} variant="primary" />
+          <StatCard title="New Orders" value={sales.filter((sale) => orderStatus(sale) === 'new').length} icon={ShoppingCart} variant="blue" />
+          <StatCard title="Pending Pre-Orders" value={pendingPreorders.length} icon={Clock} variant="orange" />
+          <StatCard title="Preparing / Ready" value={sales.filter((sale) => ['preparing', 'ready'].includes(orderStatus(sale))).length} icon={Utensils} variant="purple" />
+        </> : <>
         <StatCard 
           title="Today's Revenue" 
           value={`₵${totalRevenue.toFixed(2)}`}
@@ -1220,6 +1293,7 @@ const DashboardView = ({ sales, meals, preorders, user, fetchData }) => {
           icon={Package}
           variant="purple"
         />
+        </>}
       </div>
 
       <div className="dashboard-grid">
@@ -1348,7 +1422,7 @@ const InventoryView = ({ user, fetchData }) => {
   const [deletingMealId, setDeletingMealId] = useState(null);
   const [formData, setFormData] = useState({
     name: "", category: "Breakfast Meals", price: "", stock: "",
-    description: "", image_url: "", available_start: "08:00", available_end: "10:30"
+    description: "", image_url: "", available_start: "08:00", available_end: "10:30", availability_status: "available"
   });
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
@@ -1358,7 +1432,7 @@ const InventoryView = ({ user, fetchData }) => {
     setEditingMeal(null);
     setFormData({
       name: "", category: "Breakfast Meals", price: "", stock: "",
-      description: "", image_url: "", available_start: "08:00", available_end: "10:30"
+      description: "", image_url: "", available_start: "08:00", available_end: "10:30", availability_status: "available"
     });
     setImageFile(null);
     setImagePreview(null);
@@ -1368,7 +1442,7 @@ const InventoryView = ({ user, fetchData }) => {
     setEditingMeal(null);
     setFormData({
       name: "", category: "Breakfast Meals", price: "", stock: "",
-      description: "", image_url: "", available_start: "08:00", available_end: "10:30"
+      description: "", image_url: "", available_start: "08:00", available_end: "10:30", availability_status: "available"
     });
     setImageFile(null);
     setImagePreview(null);
@@ -1402,7 +1476,8 @@ const InventoryView = ({ user, fetchData }) => {
         price: editingMeal.price.toString(), stock: editingMeal.stock.toString(),
         description: editingMeal.description || "", image_url: editingMeal.image_url || "",
         available_start: editingMeal.available_start || "08:00",
-        available_end: editingMeal.available_end || "10:30"
+        available_end: editingMeal.available_end || "10:30",
+        availability_status: editingMeal.availability_status || "available"
       });
       setImagePreview(editingMeal.image_url || null);
       setIsAdding(true);
@@ -1502,12 +1577,13 @@ const InventoryView = ({ user, fetchData }) => {
         </div>
       ) : (
         <div className="inventory-grid">
-          {inventory.map(meal => (
+                    {inventory.map(meal => (
             <Card key={meal.id} className="inventory-card" hover padding={false}>
               <div className="inventory-card-image-wrapper">
                 <img src={meal.image_url || "https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=400"} alt={meal.name} className="inventory-card-image" onError={handleMealImageError} />
                 <div className="inventory-card-overlay">
                   <Badge variant="light" size="xs">{meal.category}</Badge>
+                  <Badge variant="light" size="xs">{meal.seller_id ? (meal.seller_id === user?.id ? "My meal" : "Seller meal") : "Administrator meal"}</Badge>
                 </div>
               </div>
               <div className="inventory-card-content">
@@ -1524,15 +1600,15 @@ const InventoryView = ({ user, fetchData }) => {
                     </span>
                   </div>
                   <div className="inventory-actions">
-                    <IconButton icon={Edit3} variant="outline" size="sm" onClick={() => setEditingMeal(meal)} />
-                    <IconButton 
+                    {(isAdmin || meal.seller_id === user?.id) && <IconButton icon={Edit3} variant="outline" size="sm" onClick={() => setEditingMeal(meal)} />}
+                    {(isAdmin || meal.seller_id === user?.id) && <IconButton
                       icon={Trash2} 
                       variant="outline" 
                       size="sm" 
                       className="text-danger"
                       onClick={() => handleDeleteMeal(meal)}
                       disabled={deletingMealId === meal.id}
-                    />
+                    />}
                   </div>
                 </div>
               </div>
@@ -1616,6 +1692,13 @@ const InventoryView = ({ user, fetchData }) => {
                     required
                   />
                 </div>
+
+                <label className="input-label" htmlFor="meal-availability">Meal availability</label>
+                <select id="meal-availability" className="form-input" value={formData.availability_status} onChange={e => setFormData({...formData, availability_status: e.target.value})}>
+                  <option value="available">Available</option>
+                  <option value="unavailable">Temporarily unavailable</option>
+                  <option value="sold_out">Sold out</option>
+                </select>
 
                 <Textarea 
                   label="Description"
@@ -2133,7 +2216,7 @@ export default function App() {
   useEffect(() => {
     SyncService.getSession().then((sessionUser) => {
       setUser(sessionUser);
-      if (sessionUser?.role === Role.SELLER) setActiveTab('inventory');
+      if (sessionUser?.role === Role.SELLER) setActiveTab('dashboard');
     }).catch((error) => {
       console.error("Unable to restore session:", error);
     });
@@ -2228,7 +2311,7 @@ export default function App() {
       userData.role === Role.BUYER
         ? 'browse'
         : userData.role === Role.SELLER
-          ? 'inventory'
+          ? 'dashboard'
           : 'dashboard'
     );
   };
@@ -2251,6 +2334,8 @@ export default function App() {
   };
 
   const isMealAvailable = (meal) => {
+    if (meal.availability_status && meal.availability_status !== "available") return false;
+    if (Number(meal.stock) <= 0) return false;
     const now = currentTime.getHours() * 60 + currentTime.getMinutes();
     const [startH, startM] = meal.available_start.split(':').map(Number);
     const [endH, endM] = meal.available_end.split(':').map(Number);
@@ -2316,7 +2401,7 @@ export default function App() {
 
   if (!user) return <AuthView handleLogin={handleLogin} handleRegister={handleRegister} />;
 
-  const unreadNotificationCount = user?.role === Role.BUYER
+  const unreadNotificationCount = [Role.BUYER, Role.SELLER].includes(user?.role)
     ? notifications.filter((n) => !n.read_at).length
     : 0;
 
@@ -2324,8 +2409,11 @@ export default function App() {
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'reports', label: 'Analytics', icon: TrendingUp, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'browse', label: 'Menu', icon: Utensils, roles: [Role.BUYER] },
+    { id: 'my-orders', label: 'My Orders', icon: ShoppingCart, roles: [Role.BUYER] },
     { id: 'preorders', label: 'Pre-Orders', icon: Clock, roles: [Role.BUYER] },
-    { id: 'inventory', label: user.role === Role.SELLER ? 'My Foods' : 'Inventory', icon: Package, roles: [Role.ADMIN, Role.SELLER] },
+    { id: 'inventory', label: user.role === Role.SELLER ? 'Shared Inventory & My Meals' : 'Inventory', icon: Package, roles: [Role.ADMIN, Role.SELLER] },
+    { id: 'orders', label: 'Orders', icon: ShoppingCart, roles: [Role.SELLER] },
+    { id: 'seller-preorders', label: 'Pre-Orders', icon: Clock, roles: [Role.SELLER] },
     { id: 'sellers', label: 'Sellers', icon: Users, roles: [Role.ADMIN] },
     { id: 'cart', label: 'Cart', icon: ShoppingCart, roles: [Role.BUYER], count: cart.length },
     { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER, Role.BUYER], count: unreadNotificationCount },
@@ -2448,8 +2536,11 @@ export default function App() {
               {activeTab === 'dashboard' && <DashboardView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
               {activeTab === 'reports' && <ReportsView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
               {activeTab === 'inventory' && [Role.ADMIN, Role.SELLER].includes(user.role) && <InventoryView user={user} fetchData={fetchData} />}
+              {activeTab === 'orders' && user.role === Role.SELLER && <OrdersView sales={sales} meals={meals} fetchData={fetchData} />}
+              {activeTab === 'seller-preorders' && user.role === Role.SELLER && <SellerPreOrdersView preorders={preorders} meals={meals} fetchData={fetchData} />}
               {activeTab === 'sellers' && user.role === Role.ADMIN && <SellersView />}
               {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} getRemainingTime={getRemainingTime} />}
+              {activeTab === 'my-orders' && user.role === Role.BUYER && <BuyerOrdersView />}
               {activeTab === 'preorders' && <PreOrderView meals={meals} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} />}
               {activeTab === 'cart' && <CartView cart={cart} setActiveTab={setActiveTab} removeFromCart={removeFromCart} handleCheckout={handleCheckout} isProcessingPayment={isProcessingPayment} />}
               {activeTab === 'notifications' && (

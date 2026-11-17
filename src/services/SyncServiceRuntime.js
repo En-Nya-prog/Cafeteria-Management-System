@@ -210,6 +210,12 @@ async getSellers() {
     }
   },
 
+  async getMyOrders() {
+    const res = await fetch(`${API_BASE}/my-orders`);
+    if (!res.ok) throw await readError(res, "Unable to load your orders");
+    return await res.json();
+  },
+
   async processSale(sale) {
     try {
       const res = await fetch(`${API_BASE}/sales`, {
@@ -222,6 +228,16 @@ async getSellers() {
       if (error instanceof TypeError) this.addToOutbox("processSale", sale);
       else throw error;
     }
+  },
+
+  async updateOrderStatus(id, status) {
+    const res = await fetch(`${API_BASE}/sales/${encodeURIComponent(id)}/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw await readError(res, "Unable to update order status");
+    return await res.json();
   },
 
   async initializePayment(payload) {
