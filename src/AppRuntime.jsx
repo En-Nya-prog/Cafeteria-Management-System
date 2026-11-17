@@ -1600,7 +1600,11 @@ const InventoryView = ({ user, fetchData }) => {
                     </span>
                   </div>
                   <div className="inventory-actions">
-                    {(isAdmin || meal.seller_id === user?.id) && <IconButton icon={Edit3} variant="outline" size="sm" onClick={() => setEditingMeal(meal)} />}
+                    {isAdmin ? (
+                      <IconButton icon={Edit3} variant="outline" size="sm" title={`Edit ${meal.name}`} onClick={() => setEditingMeal(meal)} />
+                    ) : meal.seller_id === user?.id ? (
+                      <Button variant="outline" size="xs" icon={Edit3} onClick={() => setEditingMeal(meal)}>Edit</Button>
+                    ) : null}
                     {(isAdmin || meal.seller_id === user?.id) && <IconButton
                       icon={Trash2} 
                       variant="outline" 
