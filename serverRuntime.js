@@ -1462,6 +1462,19 @@ const verifyAndFulfillPayment = async (reference) => {
     res.json(notifications);
   }));
 
+app.post("/api/notifications/read", isBuyer, asyncHandler(async (req, res) => {
+  const readAt = new Date().toISOString();
+
+  await db.prepare(`
+    UPDATE user_notifications
+    SET read_at = ?
+    WHERE user_id = ? AND read_at IS NULL
+  `).run(readAt, req.user.id);
+
+  res.json({ success: true });
+}));
+
+
   app.get("/api/notification-preferences", isBuyer, asyncHandler(async (req, res) => {
     const preferences = await db.prepare(`
       SELECT phone, meal_email_opt_in, meal_sms_opt_in

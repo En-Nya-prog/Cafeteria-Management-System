@@ -824,6 +824,23 @@ const NotificationsView = ({ notifications, fetchData, user }) => {
     });
   }, [user?.role]);
 
+
+useEffect(() => {
+  if (user?.role !== Role.BUYER) return;
+
+  const markAsRead = async () => {
+    try {
+      await SyncService.markNotificationsAsRead();
+      await fetchData();
+    } catch (error) {
+      console.error("Unable to mark notifications as read:", error);
+    }
+  };
+
+  markAsRead();
+}, [user?.role]);
+
+
   const savePreferences = async (event) => {
     event.preventDefault();
     if (!preferences || isSavingPreferences) return;
@@ -2307,7 +2324,7 @@ export default function App() {
             <IconButton
               icon={Bell}
               variant="ghost"
-              badge={notifications.length || undefined}
+             badge={notifications.filter(n => !n.read_at).length || undefined}
               onClick={() => setActiveTab('notifications')}
             />
             <IconButton icon={Settings} variant="ghost" />

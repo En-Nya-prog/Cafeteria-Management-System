@@ -317,6 +317,17 @@ async getSellers() {
     }
   },
 
+async markNotificationsAsRead() {
+  const res = await fetch(`${API_BASE}/notifications/read`, {
+    method: "POST",
+  });
+
+  if (!res.ok) {
+    throw await readError(res, "Unable to mark notifications as read");
+  }
+},
+
+
   async getNotificationPreferences() {
     const res = await fetch(`${API_BASE}/notification-preferences`);
     if (!res.ok) throw await readError(res, "Unable to load notification settings");
