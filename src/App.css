@@ -2158,6 +2158,22 @@ button {
   display: flex;
   align-items: flex-start;
   gap: var(--space-4);
+  cursor: pointer;
+  position: relative;
+  transition: all var(--transition-fast);
+}
+
+.notification-item-unread {
+  background-color: var(--color-primary-50);
+  border-left: 3px solid var(--color-primary-500);
+}
+
+.notification-item-read {
+  opacity: 0.8;
+}
+
+.notification-item-read:hover {
+  opacity: 1;
 }
 
 .notification-icon {

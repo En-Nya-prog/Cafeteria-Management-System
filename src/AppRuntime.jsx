@@ -37,7 +37,8 @@ import {
   Moon,
   Settings,
   HelpCircle,
-  RefreshCw
+  RefreshCw,
+  CheckCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { CATEGORY_TIMES } from './constants.js';
@@ -76,8 +77,8 @@ const Button = ({ children, onClick, variant = 'primary', size = 'md', className
   );
 };
 
-const Card = ({ children, className = "", hover = false, padding = true }) => (
-  <div className={`card ${hover ? 'card-hover' : ''} ${padding ? 'card-padding' : ''} ${className}`}>
+const Card = ({ children, className = "", hover = false, padding = true, ...props }) => (
+  <div className={`card ${hover ? 'card-hover' : ''} ${padding ? 'card-padding' : ''} ${className}`} {...props}>
     {children}
   </div>
 );
@@ -812,7 +813,7 @@ const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProces
   );
 };
 
-const NotificationsView = ({ notifications, fetchData, user }) => {
+const NotificationsView = ({ notifications, setNotifications, fetchData, user }) => {
   const [preferences, setPreferences] = useState(null);
   const [isSavingPreferences, setIsSavingPreferences] = useState(false);
   const [preferenceMessage, setPreferenceMessage] = useState("");
@@ -824,22 +825,56 @@ const NotificationsView = ({ notifications, fetchData, user }) => {
     });
   }, [user?.role]);
 
+  const unreadCount = useMemo(() => {
+    return user?.role === Role.BUYER
+      ? notifications.filter((n) => !n.read_at).length
+      : 0;
+  }, [notifications, user?.role]);
 
-useEffect(() => {
-  if (user?.role !== Role.BUYER) return;
+  const handleNotificationClick = async (notification) => {
+    if (!notification || notification.read_at || user?.role !== Role.BUYER) {
+      return;
+    }
 
-  const markAsRead = async () => {
+    const readAt = new Date().toISOString();
+
+    // Optimistically update notifications state so the badge and UI update immediately
+    if (setNotifications) {
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === notification.id ? { ...n, read_at: readAt } : n))
+      );
+    }
+
     try {
-      await SyncService.markNotificationsAsRead();
-      await fetchData();
+      await SyncService.markNotificationAsRead(notification.id);
     } catch (error) {
-      console.error("Unable to mark notifications as read:", error);
+      console.error("Unable to mark notification as read:", error);
+      if (fetchData) {
+        await fetchData();
+      }
     }
   };
 
-  markAsRead();
-}, [user?.role]);
+  const handleMarkAllAsRead = async () => {
+    if (user?.role !== Role.BUYER || unreadCount === 0) return;
 
+    const readAt = new Date().toISOString();
+
+    if (setNotifications) {
+      setNotifications((prev) =>
+        prev.map((n) => ({ ...n, read_at: n.read_at || readAt }))
+      );
+    }
+
+    try {
+      await SyncService.markNotificationsAsRead();
+    } catch (error) {
+      console.error("Unable to mark all notifications as read:", error);
+      if (fetchData) {
+        await fetchData();
+      }
+    }
+  };
 
   const savePreferences = async (event) => {
     event.preventDefault();
@@ -863,9 +898,21 @@ useEffect(() => {
           <h1 className="page-title">Notifications</h1>
           <p className="page-subtitle">Stay updated with your orders and alerts</p>
         </div>
-        <Button variant="outline" size="sm" icon={RefreshCw} onClick={fetchData}>
-          Refresh
-        </Button>
+        <div className="notifications-header-actions" style={{ display: 'flex', gap: 'var(--space-2)' }}>
+          {user?.role === Role.BUYER && unreadCount > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              icon={CheckCheck}
+              onClick={handleMarkAllAsRead}
+            >
+              Mark all as read
+            </Button>
+          )}
+          <Button variant="outline" size="sm" icon={RefreshCw} onClick={fetchData}>
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {user?.role === Role.BUYER && preferences && (
@@ -913,26 +960,48 @@ useEffect(() => {
       )}
 
       <div className="notifications-list">
-        {notifications.map(n => (
-          <motion.div
-            key={n.id}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-          >
-            <Card className="notification-item" hover>
-              <div className={`notification-icon notification-icon-${n.type}`}>
-                {n.type === 'order' ? <Clock size={20} /> : n.type === 'meal' ? <Package size={20} /> : <CheckCircle size={20} />}
-              </div>
-              <div className="notification-content">
-                <div className="notification-header">
-                  <h4 className="notification-title">{n.title}</h4>
-                  <span className="notification-time">{new Date(n.timestamp).toLocaleString()}</span>
+        {notifications.map(n => {
+          const isUnread = !n.read_at && user?.role === Role.BUYER;
+          return (
+            <motion.div
+              key={n.id}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+            >
+              <Card
+                className={`notification-item ${isUnread ? 'notification-item-unread' : 'notification-item-read'}`}
+                hover
+                onClick={() => handleNotificationClick(n)}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleNotificationClick(n);
+                  }
+                }}
+              >
+                <div className={`notification-icon notification-icon-${n.type}`}>
+                  {n.type === 'order' ? <Clock size={20} /> : n.type === 'meal' ? <Package size={20} /> : <CheckCircle size={20} />}
                 </div>
-                <p className="notification-message">{n.message}</p>
-              </div>
-            </Card>
-          </motion.div>
-        ))}
+                <div className="notification-content">
+                  <div className="notification-header">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      <h4 className="notification-title">{n.title}</h4>
+                      {isUnread && (
+                        <Badge variant="primary" size="xs" dot>
+                          New
+                        </Badge>
+                      )}
+                    </div>
+                    <span className="notification-time">{new Date(n.timestamp).toLocaleString()}</span>
+                  </div>
+                  <p className="notification-message">{n.message}</p>
+                </div>
+              </Card>
+            </motion.div>
+          );
+        })}
         
         {notifications.length === 0 && (
           <EmptyState 
@@ -2220,6 +2289,10 @@ export default function App() {
 
   if (!user) return <AuthView handleLogin={handleLogin} handleRegister={handleRegister} />;
 
+  const unreadNotificationCount = user?.role === Role.BUYER
+    ? notifications.filter((n) => !n.read_at).length
+    : 0;
+
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'reports', label: 'Analytics', icon: TrendingUp, roles: [Role.ADMIN, Role.SELLER] },
@@ -2228,7 +2301,7 @@ export default function App() {
     { id: 'inventory', label: user.role === Role.SELLER ? 'My Foods' : 'Inventory', icon: Package, roles: [Role.ADMIN, Role.SELLER] },
     { id: 'sellers', label: 'Sellers', icon: Users, roles: [Role.ADMIN] },
     { id: 'cart', label: 'Cart', icon: ShoppingCart, roles: [Role.BUYER], count: cart.length },
-    { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER, Role.BUYER] },
+    { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER, Role.BUYER], count: unreadNotificationCount },
     { id: 'feedback', label: 'Feedback', icon: MessageSquare, roles: [Role.ADMIN, Role.SELLER, Role.BUYER] },
   ];
 
@@ -2324,7 +2397,7 @@ export default function App() {
             <IconButton
               icon={Bell}
               variant="ghost"
-             badge={notifications.filter(n => !n.read_at).length || undefined}
+              badge={unreadNotificationCount || undefined}
               onClick={() => setActiveTab('notifications')}
             />
             <IconButton icon={Settings} variant="ghost" />
@@ -2352,7 +2425,14 @@ export default function App() {
               {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} getRemainingTime={getRemainingTime} />}
               {activeTab === 'preorders' && <PreOrderView meals={meals} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} />}
               {activeTab === 'cart' && <CartView cart={cart} setActiveTab={setActiveTab} removeFromCart={removeFromCart} handleCheckout={handleCheckout} isProcessingPayment={isProcessingPayment} />}
-              {activeTab === 'notifications' && <NotificationsView notifications={notifications} fetchData={fetchData} user={user} />}
+              {activeTab === 'notifications' && (
+                <NotificationsView
+                  notifications={notifications}
+                  setNotifications={setNotifications}
+                  fetchData={fetchData}
+                  user={user}
+                />
+              )}
               {activeTab === 'feedback' && <FeedbackView feedbacks={feedbacks} meals={meals} user={user} fetchData={fetchData} />}
             </motion.div>
           </AnimatePresence>

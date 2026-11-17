@@ -317,15 +317,31 @@ async getSellers() {
     }
   },
 
-async markNotificationsAsRead() {
-  const res = await fetch(`${API_BASE}/notifications/read`, {
-    method: "POST",
-  });
+  async markNotificationAsRead(id) {
+    const res = await fetch(`${API_BASE}/notifications/read`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
 
-  if (!res.ok) {
-    throw await readError(res, "Unable to mark notifications as read");
-  }
-},
+    if (!res.ok) {
+      throw await readError(res, "Unable to mark notification as read");
+    }
+    return await res.json().catch(() => ({ success: true }));
+  },
+
+  async markNotificationsAsRead(id) {
+    const res = await fetch(`${API_BASE}/notifications/read`, {
+      method: "POST",
+      headers: id ? { "Content-Type": "application/json" } : undefined,
+      body: id ? JSON.stringify({ id }) : undefined,
+    });
+
+    if (!res.ok) {
+      throw await readError(res, "Unable to mark notifications as read");
+    }
+    return await res.json().catch(() => ({ success: true }));
+  },
 
 
   async getNotificationPreferences() {

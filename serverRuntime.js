@@ -1448,7 +1448,7 @@ const verifyAndFulfillPayment = async (reference) => {
   app.get("/api/notifications", authenticate, asyncHandler(async (req, res) => {
     if (req.user.role === CUSTOMER_ROLE) {
       const notifications = await db.prepare(`
-        SELECT id, type, title, message, timestamp, read_at
+        SELECT id, type, title, message, meal_id, timestamp, read_at
         FROM user_notifications
         WHERE user_id = ?
         ORDER BY timestamp DESC
@@ -1462,17 +1462,38 @@ const verifyAndFulfillPayment = async (reference) => {
     res.json(notifications);
   }));
 
-app.post("/api/notifications/read", isBuyer, asyncHandler(async (req, res) => {
-  const readAt = new Date().toISOString();
+  app.post("/api/notifications/read", isBuyer, asyncHandler(async (req, res) => {
+    const readAt = new Date().toISOString();
+    const { id } = req.body || {};
 
-  await db.prepare(`
-    UPDATE user_notifications
-    SET read_at = ?
-    WHERE user_id = ? AND read_at IS NULL
-  `).run(readAt, req.user.id);
+    if (id) {
+      await db.prepare(`
+        UPDATE user_notifications
+        SET read_at = ?
+        WHERE user_id = ? AND id = ? AND read_at IS NULL
+      `).run(readAt, req.user.id, id);
+    } else {
+      await db.prepare(`
+        UPDATE user_notifications
+        SET read_at = ?
+        WHERE user_id = ? AND read_at IS NULL
+      `).run(readAt, req.user.id);
+    }
 
-  res.json({ success: true });
-}));
+    res.json({ success: true });
+  }));
+
+  app.post("/api/notifications/:id/read", isBuyer, asyncHandler(async (req, res) => {
+    const readAt = new Date().toISOString();
+
+    await db.prepare(`
+      UPDATE user_notifications
+      SET read_at = ?
+      WHERE user_id = ? AND id = ? AND read_at IS NULL
+    `).run(readAt, req.user.id, req.params.id);
+
+    res.json({ success: true });
+  }));
 
 
   app.get("/api/notification-preferences", isBuyer, asyncHandler(async (req, res) => {
