@@ -2,19 +2,35 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SyncService } from "../src/services/SyncServiceRuntime.js";
 
-test("shared inventory falls back to the canonical meal list for seller visibility", async () => {
+test("seller inventory uses the canonical shared meal list", async () => {
   const originalFetch = globalThis.fetch;
   const requestedUrls = [];
   const meals = [{ id: "admin-meal", name: "Shared lunch", seller_id: null }];
   globalThis.fetch = async (url) => {
     requestedUrls.push(url);
-    if (url === "/api/inventory") return { ok: false, status: 401, json: async () => ({ message: "Authentication required" }) };
     return { ok: true, json: async () => meals };
   };
 
   try {
     assert.deepEqual(await SyncService.getInventory("Seller"), meals);
-    assert.deepEqual(requestedUrls, ["/api/inventory", "/api/meals"]);
+    assert.deepEqual(requestedUrls, ["/api/meals"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("seller sees shared meals even when the legacy endpoint would return none", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  const sharedMeals = [{ id: "admin-meal", name: "Admin meal", seller_id: null }];
+  globalThis.fetch = async (url) => {
+    requestedUrls.push(url);
+    return { ok: true, json: async () => (url === "/api/inventory" ? [] : sharedMeals) };
+  };
+
+  try {
+    assert.deepEqual(await SyncService.getInventory("Seller"), sharedMeals);
+    assert.deepEqual(requestedUrls, ["/api/meals"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

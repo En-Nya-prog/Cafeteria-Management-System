@@ -126,6 +126,20 @@ async getSellers() {
   },
 
   async getInventory(role) {
+    if (role === "Seller") {
+      // Sellers share one menu. Read the canonical public menu first so an
+      // older API that filters inventory by seller cannot hide shared meals.
+      try {
+        const sharedRes = await fetch(`${API_BASE}/meals`);
+        if (sharedRes.ok) {
+          const sharedMeals = await sharedRes.json();
+          if (Array.isArray(sharedMeals)) return sharedMeals;
+        }
+      } catch (error) {
+        console.warn("Shared meal list is temporarily unavailable:", error);
+      }
+    }
+
     try {
       const res = await fetch(`${API_BASE}/inventory`);
       if (!res.ok) {
@@ -133,7 +147,8 @@ async getSellers() {
       }
 
       const data = await res.json();
-      return Array.isArray(data) ? data : [];
+      const inventory = Array.isArray(data) ? data : [];
+      return inventory;
     } catch (e) {
       // The buyer menu endpoint is also the canonical shared meal list. It is
       // public by design, so sellers can still see admin and peer meals when
