@@ -10,3 +10,8 @@ coverage/
 cafeteria.db
 cafeteria.db-shm
 cafeteria.db-wal
+.vercel
+.env*
+.env
+.env.local
+.env.*.local
