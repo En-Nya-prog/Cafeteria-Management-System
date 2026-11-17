@@ -1788,6 +1788,10 @@ const SellersView = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const [editingSeller, setEditingSeller] = useState(null);
+  const [editForm, setEditForm] = useState({ name: "", email: "", phone: "", password: "" });
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [deletingSellerId, setDeletingSellerId] = useState(null);
 
   const loadSellers = async () => {
     setIsLoading(true);
@@ -1833,6 +1837,49 @@ const SellersView = () => {
       setError(err.message || "Unable to create seller account.");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const beginEdit = (seller) => {
+    setEditingSeller(seller);
+    setEditForm({ name: seller.name || "", email: seller.email || "", phone: seller.phone || "", password: "" });
+    setMessage("");
+    setError("");
+  };
+
+  const handleEditSubmit = async (event) => {
+    event.preventDefault();
+    if (!editingSeller || isSavingEdit) return;
+    setIsSavingEdit(true);
+    setMessage("");
+    setError("");
+    try {
+      const updatedSeller = await SyncService.updateSeller(editingSeller.id, editForm);
+      setEditingSeller(null);
+      setMessage(`Seller account updated for ${updatedSeller.name}.`);
+      await loadSellers();
+    } catch (err) {
+      setError(err.message || "Unable to update seller account.");
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const handleDelete = async (seller) => {
+    if (!seller?.id || deletingSellerId) return;
+    if (!window.confirm(`Delete seller account for ${seller.name}? Their meals will remain in the shared inventory and be unassigned.`)) return;
+    setDeletingSellerId(seller.id);
+    setMessage("");
+    setError("");
+    try {
+      await SyncService.deleteSeller(seller.id);
+      if (editingSeller?.id === seller.id) setEditingSeller(null);
+      setMessage(`Seller account for ${seller.name} was deleted.`);
+      await loadSellers();
+    } catch (err) {
+      setError(err.message || "Unable to delete seller account.");
+    } finally {
+      setDeletingSellerId(null);
     }
   };
 
@@ -1923,6 +1970,22 @@ const SellersView = () => {
         </form>
       </Card>
 
+      {editingSeller && (
+        <Card className="feedback-form-card">
+          <form onSubmit={handleEditSubmit} className="feedback-form">
+            <h3>Edit Seller: {editingSeller.name}</h3>
+            <Input label="Seller Name" value={editForm.name} maxLength={120} onChange={(event) => setEditForm({ ...editForm, name: event.target.value })} required />
+            <Input label="Email" type="email" value={editForm.email} maxLength={254} onChange={(event) => setEditForm({ ...editForm, email: event.target.value })} required />
+            <Input label="Phone Number" type="tel" value={editForm.phone} maxLength={40} onChange={(event) => setEditForm({ ...editForm, phone: event.target.value })} />
+            <Input label="Reset Password (optional)" type="password" autoComplete="new-password" minLength={10} maxLength={128} value={editForm.password} onChange={(event) => setEditForm({ ...editForm, password: event.target.value })} />
+            <div style={{ display: "flex", gap: "var(--space-2)" }}>
+              <Button type="submit" disabled={isSavingEdit} icon={CheckCircle}>{isSavingEdit ? "Saving..." : "Save Changes"}</Button>
+              <Button type="button" variant="outline" onClick={() => setEditingSeller(null)}>Cancel</Button>
+            </div>
+          </form>
+        </Card>
+      )}
+
       <Card className="table-card">
         <div className="table-header">
           <div>
@@ -1979,6 +2042,7 @@ const SellersView = () => {
                   <th>Seller Name</th>
                   <th>Email Address</th>
                   <th>Phone Number</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
 
@@ -1988,6 +2052,14 @@ const SellersView = () => {
                     <td>{seller.name}</td>
                     <td>{seller.email}</td>
                     <td>{seller.phone || "Not provided"}</td>
+                    <td>
+                      <div className="table-actions">
+                        <Button variant="outline" size="xs" icon={Edit3} onClick={() => beginEdit(seller)}>Edit</Button>
+                        <Button variant="outline" size="xs" icon={Trash2} className="text-danger" disabled={deletingSellerId === seller.id} onClick={() => handleDelete(seller)}>
+                          {deletingSellerId === seller.id ? "Deleting..." : "Delete"}
+                        </Button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>

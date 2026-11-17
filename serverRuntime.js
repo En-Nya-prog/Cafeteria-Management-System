@@ -1821,6 +1821,38 @@ app.get("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
     return res.status(201).json({ success: true, user: insertedSeller });
   }));
 
+  app.patch("/api/sellers/:id", isAdmin, asyncHandler(async (req, res) => {
+    const { name, email, phone, password } = req.body || {};
+    const normalizedName = typeof name === "string" ? name.trim() : "";
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+    const normalizedPhone = typeof phone === "string" ? phone.trim() : "";
+    if (
+      !normalizedName || normalizedName.length > 120 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 254 ||
+      normalizedPhone.length > 40 ||
+      (password != null && password !== "" && (typeof password !== "string" || password.length < 10 || password.length > 128))
+    ) {
+      return res.status(400).json({ message: "Provide a valid seller name, email, phone number, and optional password of 10 to 128 characters." });
+    }
+    const seller = await db.prepare("SELECT id FROM users WHERE id = ? AND role = ?").get(req.params.id, SELLER_ROLE);
+    if (!seller) return res.status(404).json({ message: "Seller account not found." });
+    const emailOwner = await db.prepare("SELECT id FROM users WHERE email = ? AND id <> ?").get(normalizedEmail, seller.id);
+    if (emailOwner) return res.status(409).json({ message: "An account with this email already exists." });
+    const updated = password
+      ? await db.prepare(`UPDATE users SET name = ?, email = ?, phone = ?, password = ? WHERE id = ? AND role = ? RETURNING id, name, email, phone`)
+        .get(normalizedName, normalizedEmail, normalizedPhone || null, hashPassword(password), seller.id, SELLER_ROLE)
+      : await db.prepare(`UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ? AND role = ? RETURNING id, name, email, phone`)
+        .get(normalizedName, normalizedEmail, normalizedPhone || null, seller.id, SELLER_ROLE);
+    return res.json({ success: true, seller: updated });
+  }));
+
+  app.delete("/api/sellers/:id", isAdmin, asyncHandler(async (req, res) => {
+    const deleted = await db.prepare("DELETE FROM users WHERE id = ? AND role = ? RETURNING id, name, email")
+      .get(req.params.id, SELLER_ROLE);
+    if (!deleted) return res.status(404).json({ message: "Seller account not found." });
+    return res.json({ success: true, seller: deleted });
+  }));
+
   app.post("/api/login", loginRateLimit, asyncHandler(async (req, res) => {
     const { email, password, role } = req.body || {};
 

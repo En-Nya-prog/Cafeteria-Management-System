@@ -95,6 +95,22 @@ async getSellers() {
   return Array.isArray(data.sellers) ? data.sellers : [];
 },
 
+async updateSeller(id, seller) {
+  const res = await fetch(`${API_BASE}/sellers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(seller),
+  });
+  if (!res.ok) throw await readError(res, "Unable to update seller account.");
+  return (await res.json()).seller;
+},
+
+async deleteSeller(id) {
+  const res = await fetch(`${API_BASE}/sellers/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw await readError(res, "Unable to delete seller account.");
+  return await res.json();
+},
+
 
   async login({ email, password, role }) {
     const res = await fetch(`${API_BASE}/login`, {
