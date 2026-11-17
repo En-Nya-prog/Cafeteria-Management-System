@@ -244,10 +244,12 @@ async deleteSeller(id) {
 
   async getSales() {
     try {
-      const res = await fetch(`${API_BASE}/sales`);
-      return await res.json();
-    } catch (e) {
-      return [];
+      const res = await fetch(`${API_BASE}/sales`, { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return { error: data.message || `Orders request failed (HTTP ${res.status}).` };
+      return Array.isArray(data) ? data : { error: data.message || "Orders endpoint returned an invalid response." };
+    } catch (error) {
+      return { error: error?.message || "Unable to connect to the orders service." };
     }
   },
 

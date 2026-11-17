@@ -56,6 +56,21 @@ test("payment confirmation retries a temporary server failure", async () => {
   }
 });
 
+test("orders API errors are surfaced instead of being mistaken for an empty queue", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 404,
+    json: async () => ({}),
+  });
+
+  try {
+    assert.deepEqual(await SyncService.getSales(), { error: "Orders request failed (HTTP 404)." });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("markNotificationAsRead sends POST with notification id", async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl;

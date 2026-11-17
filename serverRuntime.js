@@ -1289,6 +1289,7 @@ const verifyAndFulfillPayment = async (reference) => {
   }));
 
   app.get("/api/sales", isStaff, asyncHandler(async (req, res) => {
+    res.set("Cache-Control", "no-store, max-age=0");
     const sales = req.user.role === SELLER_ROLE
       ? await db.prepare(`
         SELECT s.*, m.name AS meal_name, m.image_url, m.seller_id AS meal_seller_id,

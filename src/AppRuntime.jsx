@@ -1156,7 +1156,7 @@ const FeedbackView = ({ feedbacks, meals, user, fetchData }) => {
   );
 };
 
-const OrdersView = ({ sales, meals, fetchData }) => {
+const OrdersView = ({ sales, meals, fetchData, salesError }) => {
   const [saving, setSaving] = useState(null);
   const statusLabel = (value) => ({ new: "New Order", accepted: "Accepted", preparing: "Preparing", ready: "Ready for Pickup", completed: "Completed", cancelled: "Cancelled" }[value] || value || "New Order");
   const advance = async (sale, status) => {
@@ -1177,7 +1177,7 @@ const OrdersView = ({ sales, meals, fetchData }) => {
     <div className="dashboard-header"><div><h1 className="page-title">Orders</h1><p className="page-subtitle">Orders for your meals and the shared cafeteria menu</p></div><Button variant="outline" size="sm" icon={RefreshCw} onClick={fetchData}>Refresh</Button></div>
     <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Order reference</th><th>Meal</th><th>Buyer</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Status</th><th>Action</th></tr></thead><tbody>
       {sales.map((sale) => <tr key={sale.id}><td>{sale.order_reference || sale.id.slice(0, 8)}</td><td>{sale.meal_name || meals.find((m) => m.id === sale.meal_id)?.name || "Meal"}</td><td>{sale.customer_name || "Buyer"}</td><td>{sale.quantity}</td><td>₵{Number(sale.total_price || 0).toFixed(2)}</td><td><Badge variant={sale.payment_status === "paid" ? "success" : "warning"}>{sale.payment_status || "Recorded"}</Badge></td><td><Badge variant={sale.assignment_status === "ready" ? "success" : "default"}>{statusLabel(sale.assignment_status || sale.order_status)}</Badge></td><td>{actions(sale)}</td></tr>)}
-      {sales.length === 0 && <tr><td colSpan="8">No orders yet.</td></tr>}
+      {sales.length === 0 && <tr><td colSpan="8">{salesError ? `Orders could not be loaded: ${salesError}` : "No orders yet."}</td></tr>}
     </tbody></table></div></Card>
   </div>;
 };
@@ -2280,6 +2280,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [meals, setMeals] = useState(DEFAULT_MEALS);
   const [sales, setSales] = useState([]);
+  const [salesError, setSalesError] = useState("");
   const [preorders, setPreorders] = useState([]);
   const [feedbacks, setFeedbacks] = useState([]);
   const [notifications, setNotifications] = useState([]);
@@ -2326,6 +2327,7 @@ export default function App() {
     ]);
     setMeals(Array.isArray(m) ? m : []);
     setSales(Array.isArray(s) ? s : []);
+    setSalesError(Array.isArray(s) ? "" : (s?.error || "The orders service returned an invalid response."));
     setPreorders(Array.isArray(p) ? p : []);
     setFeedbacks(Array.isArray(f) ? f : []);
     setNotifications((prev) => {
@@ -2641,7 +2643,7 @@ export default function App() {
               {activeTab === 'dashboard' && <DashboardView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
               {activeTab === 'reports' && <ReportsView sales={sales} meals={meals} preorders={preorders} user={user} fetchData={fetchData} />}
               {activeTab === 'inventory' && [Role.ADMIN, Role.SELLER].includes(user.role) && <InventoryView user={user} fetchData={fetchData} />}
-              {activeTab === 'orders' && user.role === Role.SELLER && <OrdersView sales={sales} meals={meals} fetchData={fetchData} />}
+              {activeTab === 'orders' && user.role === Role.SELLER && <OrdersView sales={sales} meals={meals} fetchData={fetchData} salesError={salesError} />}
               {activeTab === 'seller-preorders' && user.role === Role.SELLER && <SellerPreOrdersView preorders={preorders} meals={meals} fetchData={fetchData} />}
               {activeTab === 'sellers' && user.role === Role.ADMIN && <SellersView />}
               {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} getRemainingTime={getRemainingTime} />}
