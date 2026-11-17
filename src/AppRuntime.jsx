@@ -2216,7 +2216,7 @@ export default function App() {
   useEffect(() => {
     SyncService.getSession().then((sessionUser) => {
       setUser(sessionUser);
-      if (sessionUser?.role === Role.SELLER) setActiveTab('dashboard');
+      if (sessionUser?.role === Role.SELLER) setActiveTab('inventory');
     }).catch((error) => {
       console.error("Unable to restore session:", error);
     });
@@ -2311,7 +2311,7 @@ export default function App() {
       userData.role === Role.BUYER
         ? 'browse'
         : userData.role === Role.SELLER
-          ? 'dashboard'
+          ? 'inventory'
           : 'dashboard'
     );
   };
