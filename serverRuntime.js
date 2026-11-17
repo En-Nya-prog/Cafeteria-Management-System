@@ -1,4 +1,7 @@
 import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config({ path: ".env.local" });
+dotenv.config({ path: ".env.migrate" });
 import express from "express";
 import path from "path";
 import fs from "fs";
@@ -1462,7 +1465,7 @@ const verifyAndFulfillPayment = async (reference) => {
     res.json(notifications);
   }));
 
-  app.post("/api/notifications/read", isBuyer, asyncHandler(async (req, res) => {
+  app.post("/api/notifications/read", authenticate, asyncHandler(async (req, res) => {
     const readAt = new Date().toISOString();
     const { id } = req.body || {};
 
@@ -1470,29 +1473,30 @@ const verifyAndFulfillPayment = async (reference) => {
       await db.prepare(`
         UPDATE user_notifications
         SET read_at = ?
-        WHERE user_id = ? AND id = ? AND read_at IS NULL
-      `).run(readAt, req.user.id, id);
+        WHERE (id::text = ?::text OR id = ?)
+      `).run(readAt, String(id).trim(), String(id).trim());
     } else {
       await db.prepare(`
         UPDATE user_notifications
         SET read_at = ?
-        WHERE user_id = ? AND read_at IS NULL
-      `).run(readAt, req.user.id);
+        WHERE (user_id::text = ?::text OR user_id = ?)
+      `).run(readAt, String(req.user.id), String(req.user.id));
     }
 
-    res.json({ success: true });
+    res.json({ success: true, readAt });
   }));
 
-  app.post("/api/notifications/:id/read", isBuyer, asyncHandler(async (req, res) => {
+  app.post("/api/notifications/:id/read", authenticate, asyncHandler(async (req, res) => {
     const readAt = new Date().toISOString();
+    const id = String(req.params.id).trim();
 
     await db.prepare(`
       UPDATE user_notifications
       SET read_at = ?
-      WHERE user_id = ? AND id = ? AND read_at IS NULL
-    `).run(readAt, req.user.id, req.params.id);
+      WHERE (id::text = ?::text OR id = ?)
+    `).run(readAt, id, id);
 
-    res.json({ success: true });
+    res.json({ success: true, readAt });
   }));
 
 

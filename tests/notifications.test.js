@@ -70,3 +70,27 @@ test("clicking notification updates read_at and reduces unread badge count", () 
   assert.equal(updatedUnreadCount, 1);
   assert.equal(updatedNotifications[0].read_at, readTimestamp);
 });
+
+test("background polling merge preserves locally read notifications", () => {
+  const previousState = [
+    { id: "1", title: "Meal 1", message: "Available", read_at: "2026-11-17T12:00:00Z" },
+    { id: "2", title: "Meal 2", message: "Available", read_at: null },
+  ];
+
+  // Server response where notification 1 is still null on server (e.g. replication lag)
+  const staleServerResponse = [
+    { id: "1", title: "Meal 1", message: "Available", read_at: null },
+    { id: "2", title: "Meal 2", message: "Available", read_at: null },
+  ];
+
+  const localReadMap = { "1": "2026-11-17T12:00:00Z" };
+
+  const merged = staleServerResponse.map((item) => {
+    const readAt = item.read_at || localReadMap[item.id] || previousState.find(p => p.id === item.id)?.read_at;
+    return readAt ? { ...item, read_at: readAt } : item;
+  });
+
+  const unreadCount = merged.filter((n) => !n.read_at).length;
+  assert.equal(unreadCount, 1);
+  assert.equal(merged[0].read_at, "2026-11-17T12:00:00Z");
+});

@@ -318,16 +318,21 @@ async getSellers() {
   },
 
   async markNotificationAsRead(id) {
-    const res = await fetch(`${API_BASE}/notifications/read`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
-    });
+    try {
+      const res = await fetch(`${API_BASE}/notifications/read`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
 
-    if (!res.ok) {
-      throw await readError(res, "Unable to mark notification as read");
+      if (!res.ok) {
+        throw await readError(res, "Unable to mark notification as read");
+      }
+      return await res.json().catch(() => ({ success: true }));
+    } catch (error) {
+      if (error instanceof TypeError) this.addToOutbox("markNotificationAsRead", { id });
+      throw error;
     }
-    return await res.json().catch(() => ({ success: true }));
   },
 
   async markNotificationsAsRead(id) {
@@ -394,6 +399,7 @@ async getSellers() {
         else if (item.action === "updatePreOrderStatus") await this.updatePreOrderStatus(item.data.id, item.data.status);
         else if (item.action === "submitFeedback") await this.submitFeedback(item.data);
         else if (item.action === "sendNotification") await this.sendNotification(item.data);
+        else if (item.action === "markNotificationAsRead") await this.markNotificationAsRead(item.data.id);
       } catch (e) {
         remaining.push(item);
       }

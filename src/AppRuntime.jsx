@@ -837,6 +837,16 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
     }
 
     const readAt = new Date().toISOString();
+    const userKey = user?.id ? `read_notifications_${user.id}` : "read_notifications";
+
+    // Persist to localStorage immediately so background polling never overwrites it
+    try {
+      const localReadMap = JSON.parse(localStorage.getItem(userKey) || "{}");
+      localReadMap[notification.id] = readAt;
+      localStorage.setItem(userKey, JSON.stringify(localReadMap));
+    } catch (e) {
+      console.warn("Unable to save read state to localStorage:", e);
+    }
 
     // Optimistically update notifications state so the badge and UI update immediately
     if (setNotifications) {
@@ -848,10 +858,7 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
     try {
       await SyncService.markNotificationAsRead(notification.id);
     } catch (error) {
-      console.error("Unable to mark notification as read:", error);
-      if (fetchData) {
-        await fetchData();
-      }
+      console.error("Unable to mark notification as read on server:", error);
     }
   };
 
@@ -859,6 +866,17 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
     if (user?.role !== Role.BUYER || unreadCount === 0) return;
 
     const readAt = new Date().toISOString();
+    const userKey = user?.id ? `read_notifications_${user.id}` : "read_notifications";
+
+    try {
+      const localReadMap = JSON.parse(localStorage.getItem(userKey) || "{}");
+      notifications.forEach((n) => {
+        localReadMap[n.id] = readAt;
+      });
+      localStorage.setItem(userKey, JSON.stringify(localReadMap));
+    } catch (e) {
+      console.warn("Unable to save read state to localStorage:", e);
+    }
 
     if (setNotifications) {
       setNotifications((prev) =>
@@ -869,10 +887,7 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
     try {
       await SyncService.markNotificationsAsRead();
     } catch (error) {
-      console.error("Unable to mark all notifications as read:", error);
-      if (fetchData) {
-        await fetchData();
-      }
+      console.error("Unable to mark all notifications as read on server:", error);
     }
   };
 
@@ -2147,7 +2162,19 @@ export default function App() {
     setSales(Array.isArray(s) ? s : []);
     setPreorders(Array.isArray(p) ? p : []);
     setFeedbacks(Array.isArray(f) ? f : []);
-    setNotifications(Array.isArray(n) ? n : []);
+    setNotifications((prev) => {
+      const serverNotifications = Array.isArray(n) ? n : [];
+      const userKey = user?.id ? `read_notifications_${user.id}` : "read_notifications";
+      let localReadMap = {};
+      try {
+        localReadMap = JSON.parse(localStorage.getItem(userKey) || "{}");
+      } catch {}
+
+      return serverNotifications.map((item) => {
+        const readAt = item.read_at || localReadMap[item.id] || (prev?.find(p => p.id === item.id)?.read_at);
+        return readAt ? { ...item, read_at: readAt } : item;
+      });
+    });
   };
 
   useEffect(() => {
