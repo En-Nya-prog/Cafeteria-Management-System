@@ -1590,10 +1590,38 @@ const InventoryView = ({ user, fetchData }) => {
   );
 };
 
+
 const SellersView = () => {
-  const [formData, setFormData] = useState({ name: "", email: "", password: "" });
+  const [formData, setFormData] = useState({
+    name: "",
+    email: "",
+    password: "",
+  });
+
+  const [sellers, setSellers] = useState([]);
+  const [search, setSearch] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const loadSellers = async () => {
+    setIsLoading(true);
+    setError("");
+
+    try {
+      const data = await SyncService.getSellers();
+      setSellers(data);
+    } catch (err) {
+      setError(err.message || "Unable to load registered sellers.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadSellers();
+  }, []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -1601,37 +1629,66 @@ const SellersView = () => {
 
     setIsSubmitting(true);
     setMessage("");
+    setError("");
+
     try {
       const seller = await SyncService.createSeller(formData);
-      setFormData({ name: "", email: "", password: "" });
-      setMessage(`Seller account created for ${seller.name} (${seller.email}). Share the temporary password securely.`);
-    } catch (error) {
-      setMessage(error.message || "Unable to create seller account.");
+
+      setFormData({
+        name: "",
+        email: "",
+        password: "",
+      });
+
+      setMessage(
+        `Seller account created for ${seller.name} (${seller.email}). Share the temporary password securely.`
+      );
+
+      await loadSellers();
+    } catch (err) {
+      setError(err.message || "Unable to create seller account.");
     } finally {
       setIsSubmitting(false);
     }
   };
+
+  const filteredSellers = sellers.filter((seller) => {
+    const query = search.toLowerCase();
+
+    return (
+      seller.name?.toLowerCase().includes(query) ||
+      seller.email?.toLowerCase().includes(query) ||
+      seller.phone?.toLowerCase().includes(query)
+    );
+  });
 
   return (
     <div className="seller-management-view">
       <div className="inventory-header">
         <div>
           <h1 className="page-title">Seller Accounts</h1>
-          <p className="page-subtitle">Create staff accounts for trusted cafeteria sellers</p>
+          <p className="page-subtitle">
+            Create and manage cafeteria seller accounts
+          </p>
         </div>
       </div>
 
       <Card className="feedback-form-card">
         <form onSubmit={handleSubmit} className="feedback-form">
+          <h3>Create New Seller</h3>
+
           <Input
             label="Seller Name"
             name="name"
             autoComplete="name"
             maxLength={120}
             value={formData.name}
-            onChange={(event) => setFormData({ ...formData, name: event.target.value })}
+            onChange={(event) =>
+              setFormData({ ...formData, name: event.target.value })
+            }
             required
           />
+
           <Input
             label="Email"
             name="email"
@@ -1639,9 +1696,12 @@ const SellersView = () => {
             autoComplete="email"
             maxLength={254}
             value={formData.email}
-            onChange={(event) => setFormData({ ...formData, email: event.target.value })}
+            onChange={(event) =>
+              setFormData({ ...formData, email: event.target.value })
+            }
             required
           />
+
           <Input
             label="Temporary Password"
             name="password"
@@ -1650,15 +1710,106 @@ const SellersView = () => {
             minLength={10}
             maxLength={128}
             value={formData.password}
-            onChange={(event) => setFormData({ ...formData, password: event.target.value })}
+            onChange={(event) =>
+              setFormData({ ...formData, password: event.target.value })
+            }
             required
           />
-          <p className="page-subtitle">Use at least 10 characters. Share the temporary password with the seller privately.</p>
-          {message && <p role="status" aria-live="polite">{message}</p>}
-          <Button type="submit" disabled={isSubmitting} icon={Users}>
+
+          <p className="page-subtitle">
+            Use at least 10 characters. Share the temporary password
+            with the seller privately.
+          </p>
+
+          {message && (
+            <p role="status" aria-live="polite">{message}</p>
+          )}
+
+          {error && (
+            <p role="alert" style={{ color: "red" }}>{error}</p>
+          )}
+
+          <Button
+            type="submit"
+            disabled={isSubmitting}
+            icon={Users}
+          >
             {isSubmitting ? "Creating account..." : "Create Seller Account"}
           </Button>
         </form>
+      </Card>
+
+      <Card className="table-card">
+        <div className="table-header">
+          <div>
+            <h3 className="table-title">Registered Sellers</h3>
+            <p className="page-subtitle">
+              {sellers.length} seller account{sellers.length !== 1 ? "s" : ""}
+              {" "}registered
+            </p>
+          </div>
+
+          <Button
+            variant="outline"
+            size="sm"
+            icon={RefreshCw}
+            onClick={loadSellers}
+            disabled={isLoading}
+          >
+            Refresh
+          </Button>
+        </div>
+
+        <div className="search-container">
+          <Search className="search-icon" size={20} />
+          <input
+            type="text"
+            placeholder="Search sellers by name, email or phone..."
+            className="search-input"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
+
+        {error && (
+          <p role="alert" style={{ color: "red", padding: "12px" }}>
+            {error}
+          </p>
+        )}
+
+        {isLoading ? (
+          <div className="table-empty">
+            Loading registered sellers...
+          </div>
+        ) : filteredSellers.length === 0 ? (
+          <div className="table-empty">
+            {sellers.length === 0
+              ? "No seller accounts have been registered yet."
+              : "No sellers match your search."}
+          </div>
+        ) : (
+          <div className="table-wrapper">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Seller Name</th>
+                  <th>Email Address</th>
+                  <th>Phone Number</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {filteredSellers.map((seller) => (
+                  <tr key={seller.id}>
+                    <td>{seller.name}</td>
+                    <td>{seller.email}</td>
+                    <td>{seller.phone || "Not provided"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Card>
     </div>
   );

@@ -988,6 +988,7 @@ const verifyAndFulfillPayment = async (reference) => {
     await notifySellersOfPaidOrder(reference);
   }
 
+
   return status;
 };
 
@@ -1574,6 +1575,23 @@ const verifyAndFulfillPayment = async (reference) => {
       },
     });
   }));
+
+app.get("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
+  const sellers = await db.prepare(`
+    SELECT id, name, email, phone
+    FROM users
+    WHERE role = ?
+    ORDER BY name ASC
+  `).all(SELLER_ROLE);
+
+  return res.json({
+    success: true,
+    sellers,
+  });
+}));
+
+
+
 
   app.post("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
     const { name, email, password } = req.body || {};

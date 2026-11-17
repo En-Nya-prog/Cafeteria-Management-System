@@ -84,6 +84,18 @@ export const SyncService = {
     return data.user;
   },
 
+async getSellers() {
+  const res = await fetch(`${API_BASE}/sellers`);
+
+  if (!res.ok) {
+    throw await readError(res, "Unable to load registered sellers.");
+  }
+
+  const data = await res.json();
+  return Array.isArray(data.sellers) ? data.sellers : [];
+},
+
+
   async login({ email, password, role }) {
     const res = await fetch(`${API_BASE}/login`, {
       method: "POST",
