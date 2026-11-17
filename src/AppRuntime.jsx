@@ -2287,6 +2287,7 @@ export default function App() {
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [pendingPaymentReference, setPendingPaymentReference] = useState(null);
   const paymentReturnHandled = useRef(false);
 
   useEffect(() => {
@@ -2308,6 +2309,12 @@ export default function App() {
   }, []);
 
   useEffect(() => { fetchData(); }, []);
+
+  useEffect(() => {
+    if (user?.role !== Role.BUYER || !user?.id) return;
+    const savedReference = localStorage.getItem(`pending_payment_${user.id}`);
+    if (savedReference) setPendingPaymentReference(savedReference);
+  }, [user?.id, user?.role]);
 
   const fetchData = async () => {
     const [m, s, p, f, n] = await Promise.all([
@@ -2340,20 +2347,27 @@ export default function App() {
     if (!user || paymentReturnHandled.current) return;
 
     const params = new URLSearchParams(window.location.search);
-    const reference = params.get("reference") || params.get("trxref");
+    const storageKey = `pending_payment_${user.id}`;
+    const reference = params.get("reference") || params.get("trxref") || localStorage.getItem(storageKey);
     const paymentStatus = params.get("payment");
     if (!reference && paymentStatus !== "cancelled") return;
 
     paymentReturnHandled.current = true;
-    window.history.replaceState({}, "", window.location.pathname);
+    const clearPaymentReturn = () => window.history.replaceState({}, "", window.location.pathname);
     if (!reference) {
+      clearPaymentReturn();
       alert("Checkout was cancelled. No payment was confirmed.");
       return;
     }
+    localStorage.setItem(storageKey, reference);
+    setPendingPaymentReference(reference);
 
     SyncService.verifyPayment(reference)
       .then(async ({ status }) => {
         if (status === "paid") {
+          clearPaymentReturn();
+          localStorage.removeItem(storageKey);
+          setPendingPaymentReference(null);
           setCart([]);
           await fetchData();
           alert("Payment confirmed. Your order has been recorded.");
@@ -2362,13 +2376,19 @@ export default function App() {
         } else if (status === "pending") {
           alert("Payment is still processing. Check your orders again shortly.");
         } else if (status === "expired") {
+          clearPaymentReturn();
+          localStorage.removeItem(storageKey);
+          setPendingPaymentReference(null);
           alert("The order reservation expired before payment was confirmed. Please contact the cafeteria.");
         } else {
+          clearPaymentReturn();
+          localStorage.removeItem(storageKey);
+          setPendingPaymentReference(null);
           alert("Payment was not completed. No order was recorded.");
         }
       })
       .catch((error) => {
-        alert(error.message || "Unable to confirm payment. Your order has not been marked paid.");
+        alert(`${error.message || "Unable to confirm payment."} Your reference has been saved. Do not pay again; use “Check payment again” after a moment.`);
       });
   }, [user]);
 
@@ -2600,6 +2620,17 @@ export default function App() {
         </header>
 
         <div className="main-body">
+          {user.role === Role.BUYER && pendingPaymentReference && (
+            <Card className="feedback-form-card" style={{ margin: "var(--space-4) var(--space-6) 0" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "var(--space-4)", flexWrap: "wrap" }}>
+                <div>
+                  <strong>Payment confirmation is pending</strong>
+                  <p className="page-subtitle">Reference: {pendingPaymentReference}. Don’t place the payment again while we check the result.</p>
+                </div>
+                <Button variant="outline" size="sm" icon={RefreshCw} onClick={() => window.location.reload()}>Check payment again</Button>
+              </div>
+            </Card>
+          )}
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}

@@ -36,6 +36,26 @@ test("seller sees shared meals even when the legacy endpoint would return none",
   }
 });
 
+test("payment confirmation retries a temporary server failure", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalSetTimeout = globalThis.setTimeout;
+  let attempts = 0;
+  globalThis.setTimeout = (callback) => { callback(); return 0; };
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) return { ok: false, status: 502, json: async () => ({ message: "Temporary verification failure." }) };
+    return { ok: true, json: async () => ({ status: "paid" }) };
+  };
+
+  try {
+    assert.deepEqual(await SyncService.verifyPayment("ebd_reference"), { status: "paid" });
+    assert.equal(attempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("markNotificationAsRead sends POST with notification id", async () => {
   const originalFetch = globalThis.fetch;
   let requestedUrl;

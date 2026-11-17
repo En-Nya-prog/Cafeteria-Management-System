@@ -297,11 +297,27 @@ async deleteSeller(id) {
   },
 
   async verifyPayment(reference) {
-    const res = await fetch(`${API_BASE}/payments/verify/${encodeURIComponent(reference)}`, {
-      method: "POST",
-    });
-    if (!res.ok) throw await readError(res, "Unable to confirm payment");
-    return await res.json();
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const res = await fetch(`${API_BASE}/payments/verify/${encodeURIComponent(reference)}`, {
+          method: "POST",
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const error = new Error(data.message || `Unable to confirm payment (HTTP ${res.status}).`);
+          error.status = res.status;
+          throw error;
+        }
+        return await res.json();
+      } catch (error) {
+        lastError = error;
+        const retryable = !Number.isInteger(error?.status) || [502, 503, 504].includes(error.status);
+        if (!retryable || attempt === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+      }
+    }
+    throw lastError || new Error("Unable to confirm payment.");
   },
 
   async getPreOrders() {
