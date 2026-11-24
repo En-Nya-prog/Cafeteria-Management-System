@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { config as loadEnv } from "dotenv";
 import pg from "pg";
 import { list, put } from "@vercel/blob";
+import { DAILY_MEAL_DAYS, normalizeMealDays } from "../lib/mealAvailability.js";
+import { databaseConnectionOptions } from "../lib/databaseConnection.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 loadEnv({ path: path.join(root, ".env.local") });
@@ -93,12 +95,13 @@ function parseProducts(csvText) {
       image_url: row.image_url || null,
       available_start: row.available_start || null,
       available_end: row.available_end || null,
+      available_days: row.available_days ? normalizeMealDays(row.available_days) : DAILY_MEAL_DAYS,
     };
 
     if (
       !product.id ||
       !product.name ||
-      !product.category ||
+      !product.category || !product.available_days ||
       !Number.isFinite(product.price) ||
       product.price < 0 ||
       !Number.isSafeInteger(product.stock) ||
@@ -153,8 +156,7 @@ async function preflight() {
   const products = parseProducts(csvText);
   const filenames = await validateLocalImages(products);
   const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+    ...databaseConnectionOptions(process.env.DATABASE_URL),
     max: 1,
     connectionTimeoutMillis: 10000,
   });
@@ -237,8 +239,7 @@ async function migrate() {
   const products = parseProducts(csvText);
   const filenames = await validateLocalImages(products);
   const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+    ...databaseConnectionOptions(process.env.DATABASE_URL),
     max: 1,
     connectionTimeoutMillis: 10000,
   });
@@ -257,6 +258,7 @@ async function migrate() {
         available_end TEXT
       )
     `);
+    await pool.query(`ALTER TABLE meals ADD COLUMN IF NOT EXISTS available_days TEXT NOT NULL DEFAULT '${DAILY_MEAL_DAYS}'`);
 
     const { rows: conflicts } = await pool.query(
       "SELECT id FROM meals WHERE id = ANY($1::text[])",
@@ -275,8 +277,8 @@ async function migrate() {
       for (const product of productsWithBlobUrls) {
         await client.query(
           `INSERT INTO meals
-            (id, name, category, description, price, stock, image_url, available_start, available_end)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+            (id, name, category, description, price, stock, image_url, available_start, available_end, available_days)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
           [
             product.id,
             product.name,
@@ -287,6 +289,7 @@ async function migrate() {
             product.image_url,
             product.available_start,
             product.available_end,
+            product.available_days,
           ]
         );
       }

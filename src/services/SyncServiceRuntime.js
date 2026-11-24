@@ -112,11 +112,27 @@ async deleteSeller(id) {
 },
 
 
-  async login({ email, password, role }) {
+  async authOptions() {
+    const res = await fetch(`${API_BASE}/auth/options`);
+    if (!res.ok) throw await readError(res, "Unable to load sign-in options");
+    return res.json();
+  },
+
+  async getAuditLog(before) {
+    const query = before ? `?${new URLSearchParams({ before })}` : "";
+    const res = await fetch(`${API_BASE}/audit-log${query}`, { headers: { Accept: "application/json" } });
+    if (!res.headers.get("content-type")?.includes("application/json")) {
+      throw new Error("The server did not return audit data. Restart the app server and try again.");
+    }
+    if (!res.ok) throw await readError(res, "Unable to load audit history");
+    return res.json();
+  },
+
+  async login({ email, password, mfaCode, enrollment }) {
     const res = await fetch(`${API_BASE}/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, role }),
+      body: JSON.stringify({ email, password, mfaCode, enrollment }),
     });
 
     if (!res.ok) {
@@ -124,8 +140,7 @@ async deleteSeller(id) {
       throw new Error(errorData.message || "Invalid email or password");
     }
 
-    const data = await res.json();
-    return data.user;
+    return res.json();
   },
 
   async getSession() {
