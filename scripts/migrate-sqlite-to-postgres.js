@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import pg from "pg";
 import path from "node:path";
+import { databaseConnectionOptions } from "../lib/databaseConnection.js";
 
 const sourcePath = process.env.SQLITE_SOURCE_PATH;
 const connectionString = process.env.DATABASE_URL;
@@ -43,7 +44,7 @@ const migrationTables = [
 
 const sqlitePath = path.resolve(sourcePath);
 const sqlite = new DatabaseSync(sqlitePath, { readOnly: true });
-const pool = new pg.Pool({ connectionString });
+const pool = new pg.Pool(databaseConnectionOptions(connectionString));
 
 try {
   const client = await pool.connect();

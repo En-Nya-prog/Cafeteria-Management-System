@@ -25,7 +25,6 @@ import {
   DollarSign,
   Users,
   Calendar,
-  Filter,
   MoreVertical,
   Edit3,
   Eye,
@@ -35,7 +34,6 @@ import {
   Coffee,
   Sun,
   Moon,
-  Settings,
   HelpCircle,
   RefreshCw,
   CheckCheck
@@ -44,7 +42,10 @@ import { motion, AnimatePresence } from 'motion/react';
 import { CATEGORY_TIMES } from './constants.js';
 import { Role } from './types.js';
 import { SyncService } from './services/SyncServiceRuntime.js';
-import loginIllustration from '../uploads/1774479222772-882267974.png';
+import loginIllustration from './login-illustration.png';
+import googleLogo from './google-logo.png';
+import { DAILY_MEAL_DAYS, WEEKDAYS, ghanaDate, ghanaTime, isMealScheduled, mealAvailability, minutesUntil, nextMealDate } from '../lib/mealAvailability.js';
+import { useAppMessages } from './AppMessages.jsx';
 import './App.css';
 
 const handleMealImageError = (event) => {
@@ -299,15 +300,19 @@ const LowStockAlert = ({ user, meals }) => {
 
 // --- Main Views ---
 
-const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, getRemainingTime }) => {
+const BrowseView = ({ meals, cart, addToCart, handlePreOrder, now }) => {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
+  const [availableOnly, setAvailableOnly] = useState(false);
+  const currentTime = ghanaTime(now);
+  const currentDate = ghanaDate(now);
+  const isMealAvailable = (meal) => mealAvailability(meal, currentTime, currentDate) === "available";
   const [viewMode, setViewMode] = useState("grid");
   
   const filteredMeals = meals.filter(m => {
     const matchesSearch = m.name.toLowerCase().includes(search.toLowerCase());
     const matchesCat = selectedCategory === "All" || m.category === selectedCategory;
-    return matchesSearch && matchesCat;
+    return matchesSearch && matchesCat && (!availableOnly || isMealAvailable(m));
   });
 
   const categories = ["All", "Breakfast Meals", "Lunch Meals", "Snacks", "Beverages", "Desserts"];
@@ -354,6 +359,11 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
         
         <div className="filter-bar">
           <div className="category-pills">
+            <button type="button" aria-pressed={availableOnly}
+              onClick={() => setAvailableOnly(!availableOnly)}
+              className={`category-pill ${availableOnly ? 'category-pill-active' : ''}`}>
+              Available now
+            </button>
             {categories.map(cat => (
               <button 
                 key={cat}
@@ -376,8 +386,18 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
       <div className="meal-grid">
         <AnimatePresence mode="popLayout">
           {filteredMeals.map((meal, index) => {
-            const available = isMealAvailable(meal);
-            const countdown = getRemainingTime(meal);
+            const availability = mealAvailability(meal, currentTime, currentDate);
+            const available = availability === "available";
+            const minutesLeft = minutesUntil(currentTime, meal.available_end);
+            const nextDate = availability === "closed" ? nextMealDate(meal, meal.available_start, now) : null;
+            const nextDay = nextDate && WEEKDAYS[new Date(`${nextDate}T00:00:00Z`).getUTCDay()];
+            const unavailableLabel = {
+              "sold-out": "Sold out",
+              closed: nextDay
+                ? `Opens ${nextDate === currentDate ? "today" : nextDay} at ${meal.available_start}`
+                : "Ordering hours unavailable",
+              unavailable: "Unavailable",
+            }[availability];
             const isInCart = cart.some(item => item.meal.id === meal.id);
             const cartItem = cart.find(item => item.meal.id === meal.id);
             
@@ -415,16 +435,16 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
                         {meal.category}
                       </Badge>
                       
-                      {available && (
+                      {available && minutesLeft !== null && (
                         <div className="meal-card-countdown">
                           <Clock size={12} />
-                          <span>{countdown}</span>
+                          <span>{minutesLeft === 0 ? "Closes this minute" : `${Math.floor(minutesLeft / 60)}h ${minutesLeft % 60}m left`}</span>
                         </div>
                       )}
                       
                       {!available && (
                         <div className="meal-card-unavailable-overlay">
-                          <Badge variant="dark" size="md">Not Available</Badge>
+                          <Badge variant="dark" size="md">{unavailableLabel}</Badge>
                         </div>
                       )}
                     </div>
@@ -453,7 +473,7 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
                         >
                           Add
                         </Button>
-                      ) : (
+                      ) : nextDate ? (
                         <Button 
                           onClick={() => handlePreOrder(meal)} 
                           variant="outline" 
@@ -462,7 +482,7 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
                         >
                           Pre-order
                         </Button>
-                      )}
+                      ) : null}
                     </div>
                   </div>
                 </Card>
@@ -477,7 +497,7 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
           icon={Search}
           title="No meals found"
           description="Try adjusting your search or filter to find what you're looking for"
-          action={<Button variant="outline" onClick={() => { setSearch(""); setSelectedCategory("All"); }}>Clear Filters</Button>}
+          action={<Button variant="outline" onClick={() => { setSearch(""); setSelectedCategory("All"); setAvailableOnly(false); }}>Clear Filters</Button>}
         />
       )}
     </div>
@@ -486,6 +506,12 @@ const BrowseView = ({ meals, cart, addToCart, handlePreOrder, isMealAvailable, g
 
 const ReportsView = ({ sales, meals, preorders, user, fetchData }) => {
   const [period, setPeriod] = useState('daily');
+  const [transactionSearch, setTransactionSearch] = useState('');
+  const [transactionStatus, setTransactionStatus] = useState('');
+  const statusLabels = {
+    new: 'New', accepted: 'Accepted', preparing: 'Preparing', ready: 'Ready for pickup',
+    completed: 'Completed', cancelled: 'Cancelled', recorded: 'Recorded',
+  };
 
   const filteredSales = useMemo(() => {
     const now = new Date();
@@ -506,6 +532,15 @@ const ReportsView = ({ sales, meals, preorders, user, fetchData }) => {
   const totalRevenue = filteredSales.reduce((acc, s) => acc + s.total_price, 0);
   const totalItems = filteredSales.reduce((acc, s) => acc + s.quantity, 0);
   const avgOrderValue = filteredSales.length > 0 ? totalRevenue / filteredSales.length : 0;
+  const searchTerm = transactionSearch.trim().toLowerCase();
+  const transactions = filteredSales.map(sale => ({
+    sale,
+    mealName: sale.meal_name || meals.find(meal => meal.id === sale.meal_id)?.name || 'Unknown',
+    status: (sale.assignment_status || sale.order_status || 'recorded').toLowerCase(),
+  })).filter(({ sale, mealName, status }) =>
+    (!transactionStatus || status === transactionStatus) &&
+    [mealName, sale.customer_name, sale.order_reference, sale.id]
+      .some(value => String(value ?? '').toLowerCase().includes(searchTerm)));
 
   return (
     <div className="reports-view">
@@ -566,9 +601,14 @@ const ReportsView = ({ sales, meals, preorders, user, fetchData }) => {
       <Card className="table-card">
         <div className="table-header">
           <h3 className="table-title">Recent Transactions</h3>
-          <div className="table-actions">
-            <Input placeholder="Search transactions..." icon={Search} className="table-search" />
-            <Button variant="outline" size="sm" icon={Filter}>Filter</Button>
+          <div className="table-actions transaction-filters">
+            <Input placeholder="Search transactions..." aria-label="Search transactions" icon={Search} className="table-search"
+              value={transactionSearch} onChange={event => setTransactionSearch(event.target.value)} />
+            <select className="select" aria-label="Filter transactions by status" value={transactionStatus}
+              onChange={event => setTransactionStatus(event.target.value)}>
+              <option value="">All statuses</option>
+              {Object.entries(statusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}
+            </select>
           </div>
         </div>
         
@@ -585,7 +625,7 @@ const ReportsView = ({ sales, meals, preorders, user, fetchData }) => {
               </tr>
             </thead>
             <tbody>
-              {filteredSales.map(sale => (
+              {transactions.map(({ sale, mealName, status }) => (
                 <tr key={sale.id}>
                   <td>
                     <div className="table-cell-datetime">
@@ -595,7 +635,7 @@ const ReportsView = ({ sales, meals, preorders, user, fetchData }) => {
                   </td>
                   <td>
                     <div className="table-cell-meal">
-                      <span className="table-cell-meal-name">{meals.find(m => m.id === sale.meal_id)?.name || 'Unknown'}</span>
+                      <span className="table-cell-meal-name">{mealName}</span>
                     </div>
                   </td>
                   <td>
@@ -606,15 +646,15 @@ const ReportsView = ({ sales, meals, preorders, user, fetchData }) => {
                   </td>
                   <td><Badge variant="default" size="sm">{sale.quantity}</Badge></td>
                   <td className="table-cell-amount">₵{sale.total_price.toFixed(2)}</td>
-                  <td><Badge variant="success" dot>Completed</Badge></td>
+                  <td><Badge variant={status === 'completed' ? 'success' : 'default'} dot>{statusLabels[status] || status}</Badge></td>
                 </tr>
               ))}
             </tbody>
           </table>
           
-          {filteredSales.length === 0 && (
+          {transactions.length === 0 && (
             <div className="table-empty">
-              <p>No transactions found for this period</p>
+              <p>{filteredSales.length ? 'No transactions match your filters.' : 'No transactions found for this period.'}</p>
             </div>
           )}
         </div>
@@ -623,8 +663,9 @@ const ReportsView = ({ sales, meals, preorders, user, fetchData }) => {
   );
 };
 
-const PreOrderView = ({ meals, handlePreOrder, isMealAvailable }) => {
-  const preOrderMeals = meals.filter(m => !isMealAvailable(m));
+const PreOrderView = ({ meals, handlePreOrder, now }) => {
+  const preOrderMeals = meals.filter(meal => mealAvailability(meal, ghanaTime(now), ghanaDate(now)) === "closed" &&
+    nextMealDate(meal, meal.available_start, now));
 
   return (
     <div className="preorder-view">
@@ -724,7 +765,7 @@ const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProces
               <div className="cart-items-list">
                 {cart.map(item => (
                   <motion.div 
-                    key={`${item.meal.id}-${item.pickupTime || 'now'}`} 
+                    key={`${item.meal.id}-${item.pickupDate || ''}-${item.pickupTime || 'now'}`}
                     className="cart-item"
                     layout
                     initial={{ opacity: 0, x: -20 }}
@@ -739,7 +780,7 @@ const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProces
                       </p>
                       {item.pickupTime && (
                         <Badge variant="info" size="xs">
-                          <Clock size={10} /> Pickup: {item.pickupTime}
+                          <Clock size={10} /> Pickup: {[item.pickupDate, item.pickupTime].filter(Boolean).join(" ")}
                         </Badge>
                       )}
                     </div>
@@ -749,7 +790,7 @@ const CartView = ({ cart, setActiveTab, removeFromCart, handleCheckout, isProces
                         icon={Trash2} 
                         variant="ghost" 
                         size="sm" 
-                        onClick={() => removeFromCart(item.meal.id)}
+                        onClick={() => removeFromCart(item)}
                         className="text-danger"
                       />
                     </div>
@@ -931,7 +972,7 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
       </div>
 
       {user?.role === Role.BUYER && preferences && (
-        <Card className="feedback-form-card">
+        <Card className="feedback-form-card notification-preferences-card">
           <h3 className="feedback-form-title">New meal alerts</h3>
           <p className="page-subtitle">Choose how you want to hear about newly listed foods. In-app alerts are always on.</p>
           <form onSubmit={savePreferences} className="feedback-form">
@@ -1031,6 +1072,7 @@ const NotificationsView = ({ notifications, setNotifications, fetchData, user })
 };
 
 const FeedbackView = ({ feedbacks, meals, user, fetchData }) => {
+  const { notify } = useAppMessages();
   const [comment, setComment] = useState("");
   const [rating, setRating] = useState(5);
   const [mealId, setMealId] = useState("");
@@ -1048,12 +1090,16 @@ const FeedbackView = ({ feedbacks, meals, user, fetchData }) => {
       timestamp: new Date().toISOString()
     };
 
-    await SyncService.submitFeedback(feedback);
-    setComment("");
-    setMealId("");
-    setRating(5);
-    fetchData();
-    alert("Thank you for your feedback!");
+    try {
+      await SyncService.submitFeedback(feedback);
+      setComment("");
+      setMealId("");
+      setRating(5);
+      fetchData();
+      notify("Thank you for your feedback!", "success");
+    } catch (error) {
+      notify(error.message || "Unable to submit feedback.", "error");
+    }
   };
 
   return (
@@ -1156,13 +1202,81 @@ const FeedbackView = ({ feedbacks, meals, user, fetchData }) => {
   );
 };
 
+const AuditLogView = () => {
+  const [events, setEvents] = useState([]);
+  const [next, setNext] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const loadEvents = async (before) => {
+    setLoading(true);
+    setError('');
+    try {
+      const page = await SyncService.getAuditLog(before);
+      setEvents(previous => before ? [...previous, ...page.events] : page.events);
+      setNext(page.next);
+    } catch (error) {
+      setError(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { loadEvents(); }, []);
+  const resources = { meals: 'Meal', users: 'Staff account', payments: 'Payment', staff_mfa: 'Staff authenticator' };
+  const actions = { INSERT: 'Created', UPDATE: 'Updated', DELETE: 'Deleted' };
+  const details = (event) => {
+    const { previous_price, current_price, previous_status, current_status, previous_role, current_role, password_changed } = event.details;
+    if (event.resource === 'meals') return [previous_price, current_price].filter(value => value != null).map(value => `GH₵${Number(value).toFixed(2)}`).join(' → ');
+    if (event.resource === 'payments') return [previous_status, current_status].filter(Boolean).join(' → ');
+    if (event.resource === 'users') {
+      if (password_changed) return 'Password changed';
+      return previous_role === current_role ? current_role : [previous_role, current_role].filter(Boolean).join(' → ');
+    }
+    return event.action === 'INSERT' ? 'Authenticator enrolled' : 'Authenticator removed';
+  };
+  return (
+    <div className="dashboard-view">
+      <div className="dashboard-header">
+        <div>
+          <h1 className="page-title">Audit Log</h1>
+          <p className="page-subtitle">Review recorded changes to meals, staff accounts, and payments.</p>
+        </div>
+        <Button variant="outline" icon={RefreshCw} disabled={loading} onClick={() => loadEvents()}>Refresh</Button>
+      </div>
+      {error && <p role="alert">{error}</p>}
+      <Card className="table-card">
+        <div className="table-wrapper">
+          <table className="data-table">
+            <thead><tr><th>Time (Ghana)</th><th>Actor</th><th>Record</th><th>Action</th><th>Details</th></tr></thead>
+            <tbody>
+              {events.map(event => (
+                <tr key={event.id}>
+                  <td>{new Date(event.recorded_at).toLocaleString('en-GH', { timeZone: 'Africa/Accra' })}</td>
+                  <td>{event.actor_name || event.actor_id || 'System'}</td>
+                  <td>{resources[event.resource]} <span className="audit-record-id">{event.resource_id}</span></td>
+                  <td>{actions[event.action]}</td>
+                  <td>{details(event) || '—'}</td>
+                </tr>
+              ))}
+              {!events.length && <tr><td colSpan="5">{loading ? 'Loading audit log…' : error ? 'Audit log unavailable.' : 'No events recorded yet.'}</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        {next && <Button className="audit-load-more" variant="outline" disabled={loading} onClick={() => loadEvents(next)}>
+          {loading ? 'Loading…' : 'Load more'}
+        </Button>}
+      </Card>
+    </div>
+  );
+};
+
 const OrdersView = ({ sales, meals, fetchData, salesError }) => {
+  const { notify } = useAppMessages();
   const [saving, setSaving] = useState(null);
   const statusLabel = (value) => ({ new: "New Order", accepted: "Accepted", preparing: "Preparing", ready: "Ready for Pickup", completed: "Completed", cancelled: "Cancelled" }[value] || value || "New Order");
   const advance = async (sale, status) => {
     setSaving(sale.id);
     try { await SyncService.updateOrderStatus(sale.id, status); await fetchData(); }
-    catch (error) { alert(error.message || "Unable to update order."); }
+    catch (error) { notify(error.message || "Unable to update order.", "error"); }
     finally { setSaving(null); }
   };
   const actions = (sale) => {
@@ -1175,9 +1289,9 @@ const OrdersView = ({ sales, meals, fetchData, salesError }) => {
   };
   return <div className="dashboard-view">
     <div className="dashboard-header"><div><h1 className="page-title">Orders</h1><p className="page-subtitle">Orders for your meals and the shared cafeteria menu</p></div><Button variant="outline" size="sm" icon={RefreshCw} onClick={fetchData}>Refresh</Button></div>
-    <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Order reference</th><th>Meal</th><th>Buyer</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Status</th><th>Action</th></tr></thead><tbody>
-      {sales.map((sale) => <tr key={sale.id}><td>{sale.order_reference || sale.id.slice(0, 8)}</td><td>{sale.meal_name || meals.find((m) => m.id === sale.meal_id)?.name || "Meal"}</td><td>{sale.customer_name || "Buyer"}</td><td>{sale.quantity}</td><td>₵{Number(sale.total_price || 0).toFixed(2)}</td><td><Badge variant={sale.payment_status === "paid" ? "success" : "warning"}>{sale.payment_status || "Recorded"}</Badge></td><td><Badge variant={sale.assignment_status === "ready" ? "success" : "default"}>{statusLabel(sale.assignment_status || sale.order_status)}</Badge></td><td>{actions(sale)}</td></tr>)}
-      {sales.length === 0 && <tr><td colSpan="8">{salesError ? `Orders could not be loaded: ${salesError}` : "No orders yet."}</td></tr>}
+    <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Order reference</th><th>Meal</th><th>Buyer</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Status</th><th>Pickup (Ghana time)</th><th>Action</th></tr></thead><tbody>
+      {sales.map((sale) => <tr key={sale.id}><td>{sale.order_reference || sale.id.slice(0, 8)}</td><td>{sale.meal_name || meals.find((m) => m.id === sale.meal_id)?.name || "Meal"}</td><td>{sale.customer_name || "Buyer"}</td><td>{sale.quantity}</td><td>₵{Number(sale.total_price || 0).toFixed(2)}</td><td><Badge variant={sale.payment_status === "paid" ? "success" : "warning"}>{sale.payment_status || "Recorded"}</Badge></td><td><Badge variant={sale.assignment_status === "ready" ? "success" : "default"}>{statusLabel(sale.assignment_status || sale.order_status)}</Badge></td><td>{[sale.pickup_date, sale.pickup_time].filter(Boolean).join(" ") || "When ready"}</td><td>{actions(sale)}</td></tr>)}
+      {sales.length === 0 && <tr><td colSpan="9">{salesError ? `Orders could not be loaded: ${salesError}` : "No orders yet."}</td></tr>}
     </tbody></table></div></Card>
   </div>;
 };
@@ -1193,20 +1307,21 @@ const BuyerOrdersView = () => {
   useEffect(() => { refresh(); const timer = setInterval(refresh, 5000); return () => clearInterval(timer); }, []);
   const label = (value) => ({ new: "New Order", accepted: "Accepted", preparing: "Preparing", ready: "Ready for Pickup", completed: "Completed", cancelled: "Cancelled" }[value] || "New Order");
   return <div className="dashboard-view"><div className="dashboard-header"><div><h1 className="page-title">My Orders</h1><p className="page-subtitle">Track your recent orders and pickup readiness</p></div><Button variant="outline" size="sm" icon={RefreshCw} onClick={refresh}>Refresh</Button></div>
-    <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Reference</th><th>Meal</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Status</th><th>Ordered</th></tr></thead><tbody>
-      {orders.map((order) => <tr key={order.id}><td>{order.order_reference || order.id.slice(0, 8)}</td><td>{order.meal_name}</td><td>{order.quantity}</td><td>₵{Number(order.total_price || 0).toFixed(2)}</td><td>{order.payment_status || "Recorded"}</td><td><Badge variant={order.assignment_status === "ready" ? "success" : "default"}>{label(order.assignment_status || order.order_status)}</Badge></td><td>{new Date(order.timestamp).toLocaleString()}</td></tr>)}
-      {!loading && orders.length === 0 && <tr><td colSpan="7">You have no orders yet.</td></tr>}
-      {loading && <tr><td colSpan="7">Loading orders…</td></tr>}
+    <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Reference</th><th>Meal</th><th>Qty</th><th>Amount</th><th>Payment</th><th>Status</th><th>Pickup (Ghana time)</th><th>Ordered</th></tr></thead><tbody>
+      {orders.map((order) => <tr key={order.id}><td>{order.order_reference || order.id.slice(0, 8)}</td><td>{order.meal_name}</td><td>{order.quantity}</td><td>₵{Number(order.total_price || 0).toFixed(2)}</td><td>{order.payment_status || "Recorded"}</td><td><Badge variant={order.assignment_status === "ready" ? "success" : "default"}>{label(order.assignment_status || order.order_status)}</Badge></td><td>{[order.pickup_date, order.pickup_time].filter(Boolean).join(" ") || "When ready"}</td><td>{new Date(order.timestamp).toLocaleString("en-GH", { timeZone: "Africa/Accra" })}</td></tr>)}
+      {!loading && orders.length === 0 && <tr><td colSpan="8">You have no orders yet.</td></tr>}
+      {loading && <tr><td colSpan="8">Loading orders…</td></tr>}
     </tbody></table></div></Card>
   </div>;
 };
 
 const SellerPreOrdersView = ({ preorders, meals, fetchData }) => {
+  const { notify } = useAppMessages();
   const [saving, setSaving] = useState(null);
   const change = async (item, status) => {
     setSaving(item.id);
     try { await SyncService.updatePreOrderStatus(item.id, status); await fetchData(); }
-    catch (error) { alert(error.message || "Unable to update pre-order."); }
+    catch (error) { notify(error.message || "Unable to update pre-order.", "error"); }
     finally { setSaving(null); }
   };
   const actionFor = (item) => {
@@ -1216,7 +1331,7 @@ const SellerPreOrdersView = ({ preorders, meals, fetchData }) => {
   };
   return <div className="dashboard-view"><div className="dashboard-header"><div><h1 className="page-title">Pre-Orders</h1><p className="page-subtitle">Future pickup requests for shared and seller meals</p></div><Button variant="outline" size="sm" icon={RefreshCw} onClick={fetchData}>Refresh</Button></div>
     <Card className="preorders-table-card"><div className="table-wrapper"><table className="data-table"><thead><tr><th>Reference</th><th>Meal</th><th>Buyer</th><th>Qty</th><th>Pickup time</th><th>Payment</th><th>Status</th><th>Action</th></tr></thead><tbody>
-      {preorders.map((item) => <tr key={item.id}><td>{item.id.slice(0, 8)}</td><td>{item.meal_name || meals.find((m) => m.id === item.meal_id)?.name || "Meal"}</td><td>{item.customer_name}</td><td>{item.quantity}</td><td>{item.pickup_time}</td><td>{item.payment_status || "Unpaid"}</td><td><Badge>{item.status}</Badge></td><td>{actionFor(item)}</td></tr>)}
+      {preorders.map((item) => <tr key={item.id}><td>{item.id.slice(0, 8)}</td><td>{item.meal_name || meals.find((m) => m.id === item.meal_id)?.name || "Meal"}</td><td>{item.customer_name}</td><td>{item.quantity}</td><td>{[item.pickup_date, item.pickup_time].filter(Boolean).join(" ")}</td><td>{item.payment_status || "Unpaid"}</td><td><Badge>{item.status}</Badge></td><td>{actionFor(item)}</td></tr>)}
       {preorders.length === 0 && <tr><td colSpan="8">No pre-orders yet.</td></tr>}
     </tbody></table></div></Card>
   </div>;
@@ -1343,7 +1458,7 @@ const DashboardView = ({ sales, meals, preorders, user, fetchData }) => {
                   </div>
                 </div>
                 <div className="preorder-item-meta">
-                  <span className="preorder-time">{p.pickup_time}</span>
+                  <span className="preorder-time">{[p.pickup_date, p.pickup_time].filter(Boolean).join(" ")}</span>
                   <Badge variant={p.status === 'Pending' ? 'warning' : 'success'} size="sm">{p.status}</Badge>
                 </div>
               </div>
@@ -1386,7 +1501,7 @@ const DashboardView = ({ sales, meals, preorders, user, fetchData }) => {
                     </td>
                     <td>{meals.find(m => m.id === p.meal_id)?.name}</td>
                     <td><Badge variant="default" size="sm">{p.quantity}</Badge></td>
-                    <td className="text-primary font-medium">{p.pickup_time}</td>
+                    <td className="text-primary font-medium">{[p.pickup_date, p.pickup_time].filter(Boolean).join(" ")}</td>
                     <td><Badge variant={p.status === 'Pending' ? 'warning' : 'success'} dot>{p.status}</Badge></td>
                     <td>
                       <div className="table-actions">
@@ -1414,6 +1529,7 @@ const DashboardView = ({ sales, meals, preorders, user, fetchData }) => {
 };
 
 const InventoryView = ({ user, fetchData }) => {
+  const { notify, confirmAction } = useAppMessages();
   const [inventory, setInventory] = useState([]);
   const [loadingInventory, setLoadingInventory] = useState(true);
   const [isAdding, setIsAdding] = useState(false);
@@ -1477,6 +1593,7 @@ const InventoryView = ({ user, fetchData }) => {
         description: editingMeal.description || "", image_url: editingMeal.image_url || "",
         available_start: editingMeal.available_start || "08:00",
         available_end: editingMeal.available_end || "10:30",
+        available_days: editingMeal.available_days || DAILY_MEAL_DAYS,
         availability_status: editingMeal.availability_status || "available"
       });
       setImagePreview(editingMeal.image_url || null);
@@ -1503,6 +1620,8 @@ const InventoryView = ({ user, fetchData }) => {
       const mealData = new FormData();
       mealData.append("id", editingMeal ? editingMeal.id : Math.random().toString(36).substr(2, 9));
       Object.entries(formData).forEach(([key, value]) => mealData.append(key, value));
+      if (!mealData.has("available_days")) mealData.append("available_days", DAILY_MEAL_DAYS);
+      if (!mealData.get("available_days")) throw new Error("Choose at least one available day.");
       if (imageFile) mealData.append("image", imageFile);
 
       const result = editingMeal
@@ -1517,10 +1636,10 @@ const InventoryView = ({ user, fetchData }) => {
         : result?.notificationError
           ? ` ${result.notificationError}`
           : "";
-      alert(`Meal saved successfully!${notificationSummary}`);
+      notify(`Meal saved successfully!${notificationSummary}`, "success");
     } catch (error) {
       console.error("Error saving meal:", error);
-      alert(error.message || "Failed to save meal.");
+      notify(error.message || "Failed to save meal.", "error");
     } finally {
       setSubmittingMeal(false);
     }
@@ -1528,7 +1647,11 @@ const InventoryView = ({ user, fetchData }) => {
 
   const handleDeleteMeal = async (meal) => {
     if (!meal?.id || deletingMealId) return;
-    const confirmed = window.confirm(`Delete "${meal.name}"?`);
+    const confirmed = await confirmAction({
+      title: "Delete meal?",
+      message: `Delete "${meal.name}" from the menu?`,
+      label: "Delete meal",
+    });
     if (!confirmed) return;
 
     try {
@@ -1537,10 +1660,10 @@ const InventoryView = ({ user, fetchData }) => {
       if (editingMeal?.id === meal.id) resetMealForm();
       await fetchData();
       await loadInventory();
-      alert("Meal deleted!");
+      notify("Meal deleted.", "success");
     } catch (error) {
       console.error("Error deleting meal:", error);
-      alert(error.message || "Failed to delete meal.");
+      notify(error.message || "Failed to delete meal.", "error");
     } finally {
       setDeletingMealId(null);
     }
@@ -1591,6 +1714,7 @@ const InventoryView = ({ user, fetchData }) => {
                   <h4 className="inventory-card-title">{meal.name}</h4>
                   <span className="inventory-card-price">₵{getMealPrice(meal).toFixed(2)}</span>
                 </div>
+                {meal.item_code != null && <Badge variant="light" size="xs">ITEM-{String(meal.item_code).padStart(4, "0")}</Badge>}
                 <p className="inventory-card-description">{meal.description || "No description"}</p>
                 <div className="inventory-card-footer">
                   <div className="inventory-stock">
@@ -1726,6 +1850,33 @@ const InventoryView = ({ user, fetchData }) => {
                   />
                 </div>
 
+                <fieldset className="meal-weekdays">
+                  <legend className="input-label">Available on (Ghana time)</legend>
+                  <button type="button" className="category-pill"
+                    onClick={() => setFormData(previous => ({
+                      ...previous,
+                      available_days: (previous.available_days ?? DAILY_MEAL_DAYS) === DAILY_MEAL_DAYS ? "" : DAILY_MEAL_DAYS,
+                    }))}>
+                    {(formData.available_days ?? DAILY_MEAL_DAYS) === DAILY_MEAL_DAYS ? "Clear days" : "Select all days"}
+                  </button>
+                  <div className="meal-weekday-options">
+                    {[1, 2, 3, 4, 5, 6, 0].map(day => (
+                      <label key={day}>
+                        <input type="checkbox" checked={(formData.available_days ?? DAILY_MEAL_DAYS).split(",").includes(String(day))}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setFormData(previous => {
+                              const days = (previous.available_days ?? DAILY_MEAL_DAYS).split(",").filter(Boolean);
+                              const selection = checked ? [...days, String(day)] : days.filter(value => value !== String(day));
+                              return { ...previous, available_days: selection.sort().join(",") };
+                            });
+                          }} />
+                        {WEEKDAYS[day]}
+                      </label>
+                    ))}
+                  </div>
+                </fieldset>
+
                 <div className="image-upload-section">
                   <label className="input-label">Item Image</label>
                   <div className="image-upload-options">
@@ -1780,6 +1931,7 @@ const InventoryView = ({ user, fetchData }) => {
 
 
 const SellersView = () => {
+  const { confirmAction } = useAppMessages();
   const [formData, setFormData] = useState({
     name: "",
     email: "",
@@ -1871,7 +2023,12 @@ const SellersView = () => {
 
   const handleDelete = async (seller) => {
     if (!seller?.id || deletingSellerId) return;
-    if (!window.confirm(`Delete seller account for ${seller.name}? Their meals will remain in the shared inventory and be unassigned.`)) return;
+    const confirmed = await confirmAction({
+      title: "Delete seller account?",
+      message: `Delete the account for ${seller.name}? Their meals will remain in shared inventory.`,
+      label: "Delete seller",
+    });
+    if (!confirmed) return;
     setDeletingSellerId(seller.id);
     setMessage("");
     setError("");
@@ -1908,48 +2065,50 @@ const SellersView = () => {
         </div>
       </div>
 
-      <Card className="feedback-form-card">
+      <Card className="feedback-form-card seller-form-card">
         <form onSubmit={handleSubmit} className="feedback-form">
           <h3>Create New Seller</h3>
 
-          <Input
-            label="Seller Name"
-            name="name"
-            autoComplete="name"
-            maxLength={120}
-            value={formData.name}
-            onChange={(event) =>
-              setFormData({ ...formData, name: event.target.value })
-            }
-            required
-          />
+          <div className="form-grid">
+            <Input
+              label="Seller Name"
+              name="name"
+              autoComplete="name"
+              maxLength={120}
+              value={formData.name}
+              onChange={(event) =>
+                setFormData({ ...formData, name: event.target.value })
+              }
+              required
+            />
 
-          <Input
-            label="Email"
-            name="email"
-            type="email"
-            autoComplete="email"
-            maxLength={254}
-            value={formData.email}
-            onChange={(event) =>
-              setFormData({ ...formData, email: event.target.value })
-            }
-            required
-          />
+            <Input
+              label="Email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              maxLength={254}
+              value={formData.email}
+              onChange={(event) =>
+                setFormData({ ...formData, email: event.target.value })
+              }
+              required
+            />
 
-          <Input
-            label="Temporary Password"
-            name="password"
-            type="password"
-            autoComplete="new-password"
-            minLength={10}
-            maxLength={128}
-            value={formData.password}
-            onChange={(event) =>
-              setFormData({ ...formData, password: event.target.value })
-            }
-            required
-          />
+            <Input
+              label="Temporary Password"
+              name="password"
+              type="password"
+              autoComplete="new-password"
+              minLength={10}
+              maxLength={128}
+              value={formData.password}
+              onChange={(event) =>
+                setFormData({ ...formData, password: event.target.value })
+              }
+              required
+            />
+          </div>
 
           <p className="page-subtitle">
             Use at least 10 characters. Share the temporary password
@@ -1975,14 +2134,16 @@ const SellersView = () => {
       </Card>
 
       {editingSeller && (
-        <Card className="feedback-form-card">
+        <Card className="feedback-form-card seller-form-card">
           <form onSubmit={handleEditSubmit} className="feedback-form">
             <h3>Edit Seller: {editingSeller.name}</h3>
-            <Input label="Seller Name" value={editForm.name} maxLength={120} onChange={(event) => setEditForm({ ...editForm, name: event.target.value })} required />
-            <Input label="Email" type="email" value={editForm.email} maxLength={254} onChange={(event) => setEditForm({ ...editForm, email: event.target.value })} required />
-            <Input label="Phone Number" type="tel" value={editForm.phone} maxLength={40} onChange={(event) => setEditForm({ ...editForm, phone: event.target.value })} />
-            <Input label="Reset Password (optional)" type="password" autoComplete="new-password" minLength={10} maxLength={128} value={editForm.password} onChange={(event) => setEditForm({ ...editForm, password: event.target.value })} />
-            <div style={{ display: "flex", gap: "var(--space-2)" }}>
+            <div className="form-grid">
+              <Input label="Seller Name" value={editForm.name} maxLength={120} onChange={(event) => setEditForm({ ...editForm, name: event.target.value })} required />
+              <Input label="Email" type="email" value={editForm.email} maxLength={254} onChange={(event) => setEditForm({ ...editForm, email: event.target.value })} required />
+              <Input label="Phone Number" type="tel" value={editForm.phone} maxLength={40} onChange={(event) => setEditForm({ ...editForm, phone: event.target.value })} />
+              <Input label="Reset Password (optional)" type="password" autoComplete="new-password" minLength={10} maxLength={128} value={editForm.password} onChange={(event) => setEditForm({ ...editForm, password: event.target.value })} />
+            </div>
+            <div className="form-actions">
               <Button type="submit" disabled={isSavingEdit} icon={CheckCircle}>{isSavingEdit ? "Saving..." : "Save Changes"}</Button>
               <Button type="button" variant="outline" onClick={() => setEditingSeller(null)}>Cancel</Button>
             </div>
@@ -2077,28 +2238,46 @@ const SellersView = () => {
 
 const AuthView = ({ handleLogin, handleRegister }) => {
   const [mode, setMode] = useState('login');
-  const [selectedRole, setSelectedRole] = useState(Role.ADMIN);
+  const [passwordRegistration, setPasswordRegistration] = useState(false);
+  const [mfa, setMfa] = useState(null);
+  const [mfaCode, setMfaCode] = useState('');
   const [formData, setFormData] = useState({ name: '', email: '', password: '', confirmPassword: '' });
-  const [error, setError] = useState('');
+  const [error, setError] = useState(() => {
+    const result = new URLSearchParams(window.location.search).get('google_signin');
+    if (result === 'unavailable') return 'Google sign-in is not configured yet.';
+    if (result === 'existing') return 'An account already uses this email. Sign in with your email and password.';
+    if (result === 'failed') return 'Google sign-in did not complete. Please try again.';
+    return '';
+  });
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const getRoleLabel = (role) => {
-    if (role === Role.ADMIN) return 'Administrator';
-    if (role === Role.SELLER) return 'Seller';
-    if (role === Role.BUYER) return 'Student / Faculty';
-    return 'User';
-  };
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.has('google_signin')) {
+      url.searchParams.delete('google_signin');
+      window.history.replaceState(window.history.state, '', url);
+    }
+  }, []);
 
-  const selectedRoleLabel = getRoleLabel(selectedRole);
-
-  const selectRole = (role) => {
-    setSelectedRole(role);
-    setError('');
-  };
+  useEffect(() => {
+    let active = true;
+    SyncService.authOptions().then(options => {
+      if (active) setPasswordRegistration(options.passwordRegistration);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const handleChange = (event) => {
     const { name, value } = event.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const changeMode = (next) => {
+    setMode(next);
+    setMfa(null);
+    setMfaCode('');
+    setError('');
+    setFormData(previous => ({ ...previous, password: '', confirmPassword: '' }));
   };
 
   const onSubmit = async (event) => {
@@ -2122,14 +2301,14 @@ const AuthView = ({ handleLogin, handleRegister }) => {
           name: formData.name,
           email: formData.email,
           password: formData.password,
-          role: Role.BUYER,
         });
       } else {
         if (!formData.email || !formData.password) {
           throw new Error('Email and password are required.');
         }
 
-        await handleLogin(selectedRole, formData.email, formData.password);
+        const challenge = await handleLogin(formData.email, formData.password, mfaCode, mfa?.enrollment);
+        if (challenge?.mfaRequired) setMfa(challenge);
       }
     } catch (err) {
       setError(err?.message || 'Authentication failed.');
@@ -2151,56 +2330,18 @@ const AuthView = ({ handleLogin, handleRegister }) => {
           </div>
 
           <div className="login-body">
-            {mode === 'login' ? (
-              <>
-                <p className="login-instruction">Select your role to continue</p>
-                <div className="login-buttons">
-                  <button type="button" className={`login-role-btn login-role-admin ${selectedRole === Role.ADMIN ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.ADMIN)}>
-                    <div className="login-role-icon">
-                      <Settings size={24} />
-                    </div>
-                    <div className="login-role-info">
-                      <span className="login-role-name">{getRoleLabel(Role.ADMIN)}</span>
-                      <span className="login-role-desc">Full system access</span>
-                    </div>
-                    <ChevronRight size={20} />
-                  </button>
-
-                  <button type="button" className={`login-role-btn login-role-seller ${selectedRole === Role.SELLER ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.SELLER)}>
-                    <div className="login-role-icon">
-                      <Utensils size={24} />
-                    </div>
-                    <div className="login-role-info">
-                      <span className="login-role-name">{getRoleLabel(Role.SELLER)}</span>
-                      <span className="login-role-desc">Manage orders & sales</span>
-                    </div>
-                    <ChevronRight size={20} />
-                  </button>
-
-                  <button type="button" className={`login-role-btn login-role-buyer ${selectedRole === Role.BUYER ? 'login-role-btn-selected' : ''}`} onClick={() => selectRole(Role.BUYER)}>
-                    <div className="login-role-icon">
-                      <Users size={24} />
-                    </div>
-                    <div className="login-role-info">
-                      <span className="login-role-name">{getRoleLabel(Role.BUYER)}</span>
-                      <span className="login-role-desc">Browse & order meals</span>
-                    </div>
-                    <ChevronRight size={20} />
-                  </button>
-                </div>
-              </>
-            ) : (
+            {mode === 'register' && (
               <p className="login-instruction">New accounts are created as Student / Faculty accounts.</p>
             )}
 
-            <div className="auth-toggle-row">
-              <button type="button" className={`auth-toggle ${mode === 'login' ? 'auth-toggle-active' : ''}`} onClick={() => setMode('login')}>
+            {passwordRegistration && !mfa && <div className="auth-toggle-row">
+              <button type="button" className={`auth-toggle ${mode === 'login' ? 'auth-toggle-active' : ''}`} onClick={() => changeMode('login')}>
                 Login
               </button>
-              <button type="button" className={`auth-toggle ${mode === 'register' ? 'auth-toggle-active' : ''}`} onClick={() => { setMode('register'); setSelectedRole(Role.BUYER); }}>
+              <button type="button" className={`auth-toggle ${mode === 'register' ? 'auth-toggle-active' : ''}`} onClick={() => changeMode('register')}>
                 Register
               </button>
-            </div>
+            </div>}
 
             <form onSubmit={onSubmit} className="login-form">
               {mode === 'register' && (
@@ -2214,23 +2355,33 @@ const AuthView = ({ handleLogin, handleRegister }) => {
                 />
               )}
 
-              <Input
+              {!mfa && <Input
                 label="Email"
                 type="email"
                 name="email"
                 value={formData.email}
                 onChange={handleChange}
                 placeholder="name@domain.com"
-              />
+              />}
 
-              <Input
+              {!mfa && <Input
                 label="Password"
                 type="password"
                 name="password"
                 value={formData.password}
                 onChange={handleChange}
                 placeholder="Enter password"
-              />
+              />}
+
+              {mfa && (
+                <>
+                  <h2>Verify your staff sign-in</h2>
+                  {mfa.setupKey && <p>Add a time-based account in your authenticator app using this setup key <code>{mfa.setupKey}</code>.</p>}
+                  <Input label="Authenticator code" inputMode="numeric" autoComplete="one-time-code"
+                    pattern="[0-9]{6}" maxLength={6} required value={mfaCode}
+                    onChange={event => setMfaCode(event.target.value)} />
+                </>
+              )}
 
               {mode === 'register' && (
                 <Input
@@ -2246,9 +2397,16 @@ const AuthView = ({ handleLogin, handleRegister }) => {
               {error && <div className="login-error">{error}</div>}
 
               <Button type="submit" size="lg" className="login-submit" disabled={isSubmitting}>
-                {isSubmitting ? (mode === 'login' ? 'Signing in...' : 'Creating account...') : mode === 'login' ? `Sign in as ${selectedRoleLabel}` : `Create ${selectedRoleLabel} account`}
+                {isSubmitting ? 'Please wait…' : mfa ? 'Verify code' : mode === 'login' ? 'Sign in' : 'Create account'}
               </Button>
             </form>
+            {mfa && <Button variant="ghost" onClick={() => changeMode('login')}>Back to sign in</Button>}
+            {mode === 'login' && !mfa && (
+              <a className="google-signin-link" href="/api/auth/google">
+                <img src={googleLogo} alt="" width={20} height={20} />
+                Sign in with Google
+              </a>
+            )}
           </div>
 
           <div className="login-footer">
@@ -2276,6 +2434,10 @@ const AuthView = ({ handleLogin, handleRegister }) => {
 // --- Main App ---
 
 export default function App() {
+  const { notify, dismissNotice } = useAppMessages();
+  const logoutDialog = useRef(null);
+  const [logoutPending, setLogoutPending] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
   const [user, setUser] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [meals, setMeals] = useState(DEFAULT_MEALS);
@@ -2286,9 +2448,16 @@ export default function App() {
   const [notifications, setNotifications] = useState([]);
   const [cart, setCart] = useState([]);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia('(max-width: 640px)').matches);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const pickupDialog = useRef(null);
+  const [pickupMeal, setPickupMeal] = useState(null);
+  const [pickupTime, setPickupTime] = useState("");
+  const [pickupDate, setPickupDate] = useState("");
+  const [pickupError, setPickupError] = useState("");
+  const currentGhanaTime = ghanaTime(currentTime);
   const [pendingPaymentReference, setPendingPaymentReference] = useState(null);
+  const [confirmedPayment, setConfirmedPayment] = useState(null);
   const paymentReturnHandled = useRef(false);
 
   useEffect(() => {
@@ -2358,7 +2527,7 @@ export default function App() {
     const clearPaymentReturn = () => window.history.replaceState({}, "", window.location.pathname);
     if (!reference) {
       clearPaymentReturn();
-      alert("Checkout was cancelled. No payment was confirmed.");
+      notify("Checkout was cancelled. No payment was confirmed.");
       return;
     }
     localStorage.setItem(storageKey, reference);
@@ -2371,39 +2540,41 @@ export default function App() {
           localStorage.removeItem(storageKey);
           setPendingPaymentReference(null);
           setCart([]);
+          setConfirmedPayment({ reference, userId: user.id });
           await fetchData();
-          alert("Payment confirmed. Your order has been recorded.");
         } else if (status === "needs_review") {
-          alert("Payment was received, but the order needs staff review. Please contact the cafeteria.");
+          notify("Payment was received, but the order needs staff review. Please contact the cafeteria.");
         } else if (status === "pending") {
-          alert("Payment is still processing. Check your orders again shortly.");
+          notify("Payment is still processing. Check your orders again shortly.");
         } else if (status === "expired") {
           clearPaymentReturn();
           localStorage.removeItem(storageKey);
           setPendingPaymentReference(null);
-          alert("The order reservation expired before payment was confirmed. Please contact the cafeteria.");
+          notify("The order reservation expired before payment was confirmed. Please contact the cafeteria.");
         } else {
           clearPaymentReturn();
           localStorage.removeItem(storageKey);
           setPendingPaymentReference(null);
-          alert("Payment was not completed. No order was recorded.");
+          notify("Payment was not completed. No order was recorded.");
         }
       })
       .catch((error) => {
-        alert(`${error.message || "Unable to confirm payment."} Your reference has been saved. Do not pay again; use “Check payment again” after a moment.`);
+        notify(`${error.message || "Unable to confirm payment."} Your reference has been saved. Choose Check again before trying another payment.`, "error");
       });
   }, [user]);
 
   useEffect(() => {
-    if (activeTab === 'sellers' && user?.role !== Role.ADMIN) {
+    if (['sellers', 'audit-log'].includes(activeTab) && user?.role !== Role.ADMIN) {
       setActiveTab('dashboard');
     } else if (activeTab === 'inventory' && ![Role.ADMIN, Role.SELLER].includes(user?.role)) {
       setActiveTab('dashboard');
     }
   }, [activeTab, user]);
 
-  const handleLogin = async (role, email, password) => {
-    const userData = await SyncService.login({ email, password, role });
+  const handleLogin = async (email, password, mfaCode, enrollment) => {
+    const result = await SyncService.login({ email, password, mfaCode, enrollment });
+    if (result.mfaRequired) return result;
+    const userData = result.user;
     setUser(userData);
     setActiveTab(
       userData.role === Role.BUYER
@@ -2421,57 +2592,62 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    if (logoutPending) return;
+    setLogoutPending(true);
+    setLogoutError('');
     try {
       await SyncService.logout();
+      logoutDialog.current.close();
+      setUser(null);
+      setCart([]);
+      dismissNotice();
+      setConfirmedPayment(null);
     } catch (error) {
-      alert(error.message || "Unable to log out. Please try again.");
-      return;
+      setLogoutError(error.message || 'Unable to log out. Please try again.');
+    } finally {
+      setLogoutPending(false);
     }
-    setUser(null);
-    setCart([]);
   };
 
-  const isMealAvailable = (meal) => {
-    if (meal.availability_status && meal.availability_status !== "available") return false;
-    if (Number(meal.stock) <= 0) return false;
-    const now = currentTime.getHours() * 60 + currentTime.getMinutes();
-    const [startH, startM] = meal.available_start.split(':').map(Number);
-    const [endH, endM] = meal.available_end.split(':').map(Number);
-    return now >= startH * 60 + startM && now <= endH * 60 + endM;
-  };
-
-  const getRemainingTime = (meal) => {
-    const now = currentTime.getHours() * 60 + currentTime.getMinutes();
-    const [endH, endM] = meal.available_end.split(':').map(Number);
-    const diff = endH * 60 + endM - now;
-    if (diff <= 0) return "Ended";
-    return `${Math.floor(diff / 60)}h ${diff % 60}m left`;
-  };
-
-  const addToCart = (meal, pickupTime = null) => {
+  const addToCart = (meal, pickupTime = null, pickupDate = null) => {
     setCart(prev => {
-      const existing = prev.find(item => item.meal.id === meal.id && item.pickupTime === pickupTime);
+      const existing = prev.find(item => item.meal.id === meal.id && item.pickupTime === pickupTime && item.pickupDate === pickupDate);
       if (existing) {
         return prev.map(item => 
-          (item.meal.id === meal.id && item.pickupTime === pickupTime) 
+          item === existing
             ? { ...item, quantity: item.quantity + 1 } 
             : item
         );
       }
-      return [...prev, { meal, quantity: 1, pickupTime }];
+      return [...prev, { meal, quantity: 1, pickupTime, pickupDate }];
     });
+    notify("Added to cart successfully", "success", 3000);
   };
 
-  const removeFromCart = (mealId) => {
-    setCart(prev => prev.filter(item => item.meal.id !== mealId));
+  const removeFromCart = (line) => {
+    setCart(prev => prev.filter(item => item.meal.id !== line.meal.id ||
+      item.pickupTime !== line.pickupTime || item.pickupDate !== line.pickupDate));
   };
 
   const handlePreOrder = (meal) => {
-    const time = window.prompt("Enter pickup time (e.g. 12:30):", "12:30");
-    if (time) {
-      addToCart(meal, time);
-      setActiveTab('cart');
+    setPickupMeal(meal);
+    setPickupTime(meal.available_start);
+    setPickupDate(nextMealDate(meal, meal.available_start, new Date()) || "");
+    setPickupError("");
+    pickupDialog.current.showModal();
+  };
+
+  const confirmPickup = (event) => {
+    event.preventDefault();
+    const now = new Date();
+    if (!pickupMeal || !isMealScheduled(pickupMeal, pickupDate, pickupTime) ||
+        `${pickupDate}T${pickupTime}` < `${ghanaDate(now)}T${ghanaTime(now)}`) {
+      setPickupError("Choose a future pickup date and time within this meal’s schedule.");
+      return;
     }
+    addToCart(pickupMeal, pickupTime, pickupDate);
+    pickupDialog.current.close();
+    setActiveTab('cart');
   };
 
   const handleCheckout = async () => {
@@ -2490,7 +2666,7 @@ export default function App() {
       window.location.assign(authorizationUrl.toString());
       return false;
     } catch (error) {
-      alert(error.message || "Payment failed.");
+      notify(error.message || "Payment failed.", "error");
       return false;
     } finally {
       setIsProcessingPayment(false);
@@ -2513,13 +2689,14 @@ export default function App() {
     { id: 'orders', label: 'Orders', icon: ShoppingCart, roles: [Role.SELLER] },
     { id: 'seller-preorders', label: 'Pre-Orders', icon: Clock, roles: [Role.SELLER] },
     { id: 'sellers', label: 'Sellers', icon: Users, roles: [Role.ADMIN] },
+    { id: 'audit-log', label: 'Audit Log', icon: Eye, roles: [Role.ADMIN] },
     { id: 'cart', label: 'Cart', icon: ShoppingCart, roles: [Role.BUYER], count: cart.length },
     { id: 'notifications', label: 'Notifications', icon: Bell, roles: [Role.ADMIN, Role.SELLER, Role.BUYER], count: unreadNotificationCount },
     { id: 'feedback', label: 'Feedback', icon: MessageSquare, roles: [Role.ADMIN, Role.SELLER, Role.BUYER] },
   ];
 
   return (
-    <div className={`app-layout ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+    <div className="app-layout">
       {/* Sidebar */}
       <aside className={`sidebar ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
         <div className="sidebar-header">
@@ -2540,10 +2717,13 @@ export default function App() {
             size="sm"
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
             className="sidebar-toggle"
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-expanded={!sidebarCollapsed}
+            aria-controls="app-navigation"
           />
         </div>
 
-        <nav className="sidebar-nav">
+        <nav id="app-navigation" className="sidebar-nav">
           <div className="sidebar-nav-section">
             {!sidebarCollapsed && <span className="sidebar-nav-label">Menu</span>}
             {menuItems.filter(item => item.roles.includes(user.role)).map(item => (
@@ -2573,7 +2753,8 @@ export default function App() {
               </div>
             </div>
           )}
-          <button className="sidebar-logout" onClick={handleLogout} title="Logout">
+          <button type="button" className="sidebar-logout" aria-haspopup="dialog"
+            onClick={() => { setLogoutError(''); logoutDialog.current.showModal(); }} title="Logout">
             <LogOut size={20} />
             {!sidebarCollapsed && <span>Logout</span>}
           </button>
@@ -2589,6 +2770,9 @@ export default function App() {
               variant="ghost" 
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
               className="header-menu-btn"
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-expanded={!sidebarCollapsed}
+              aria-controls="app-navigation"
             />
             <div className="header-breadcrumb">
               <span className="header-breadcrumb-item">Home</span>
@@ -2600,10 +2784,10 @@ export default function App() {
           <div className="header-right">
             <div className="header-time">
               <span className="header-time-value">
-                {currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                {currentGhanaTime} GMT
               </span>
               <span className="header-time-date">
-                {currentTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })}
+                {currentTime.toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'Africa/Accra' })}
               </span>
             </div>
             
@@ -2613,7 +2797,6 @@ export default function App() {
               badge={unreadNotificationCount || undefined}
               onClick={() => setActiveTab('notifications')}
             />
-            <IconButton icon={Settings} variant="ghost" />
             
             <div className="header-user">
               <Avatar name={user.name} size="sm" status="online" />
@@ -2622,6 +2805,18 @@ export default function App() {
         </header>
 
         <div className="main-body">
+          {user.role === Role.BUYER && confirmedPayment?.userId === user.id && (
+            <div className="payment-pending-notice payment-confirmed-notice">
+              <div className="payment-pending-copy" role="status">
+                <strong><CheckCircle size={18} aria-hidden="true" /> Payment confirmed</strong>
+                <span>Your order has been recorded. Reference: {confirmedPayment.reference}</span>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => setActiveTab('my-orders')}>View my orders</Button>
+                <IconButton icon={X} size="sm" aria-label="Dismiss payment confirmation" onClick={() => setConfirmedPayment(null)} />
+              </div>
+            </div>
+          )}
           {user.role === Role.BUYER && pendingPaymentReference && (
             <div className="payment-pending-notice" role="status">
               <div className="payment-pending-copy">
@@ -2646,9 +2841,10 @@ export default function App() {
               {activeTab === 'orders' && user.role === Role.SELLER && <OrdersView sales={sales} meals={meals} fetchData={fetchData} salesError={salesError} />}
               {activeTab === 'seller-preorders' && user.role === Role.SELLER && <SellerPreOrdersView preorders={preorders} meals={meals} fetchData={fetchData} />}
               {activeTab === 'sellers' && user.role === Role.ADMIN && <SellersView />}
-              {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} getRemainingTime={getRemainingTime} />}
+              {activeTab === 'audit-log' && user.role === Role.ADMIN && <AuditLogView />}
+              {activeTab === 'browse' && <BrowseView meals={meals} cart={cart} addToCart={addToCart} handlePreOrder={handlePreOrder} now={currentTime} />}
               {activeTab === 'my-orders' && user.role === Role.BUYER && <BuyerOrdersView />}
-              {activeTab === 'preorders' && <PreOrderView meals={meals} handlePreOrder={handlePreOrder} isMealAvailable={isMealAvailable} />}
+              {activeTab === 'preorders' && <PreOrderView meals={meals} handlePreOrder={handlePreOrder} now={currentTime} />}
               {activeTab === 'cart' && <CartView cart={cart} setActiveTab={setActiveTab} removeFromCart={removeFromCart} handleCheckout={handleCheckout} isProcessingPayment={isProcessingPayment} />}
               {activeTab === 'notifications' && (
                 <NotificationsView
@@ -2663,6 +2859,36 @@ export default function App() {
           </AnimatePresence>
         </div>
       </main>
+      <dialog ref={logoutDialog} className="logout-dialog" aria-labelledby="logout-heading"
+        aria-describedby="logout-message" onCancel={(event) => { if (logoutPending) event.preventDefault(); }}>
+        <div className="login-form">
+          <h2 id="logout-heading">Log out?</h2>
+          <p id="logout-message">Are you sure you want to log out?</p>
+          {logoutError && <p role="alert">{logoutError}</p>}
+          <div className="flex gap-2">
+            <button type="button" className="btn btn-outline btn-md" autoFocus disabled={logoutPending}
+              onClick={() => logoutDialog.current.close()}>Cancel</button>
+            <Button disabled={logoutPending} onClick={handleLogout}>
+              {logoutPending ? 'Logging out…' : 'Log out'}
+            </Button>
+          </div>
+        </div>
+      </dialog>
+      <dialog ref={pickupDialog} className="pickup-dialog" aria-labelledby="pickup-heading">
+        <form onSubmit={confirmPickup} className="login-form">
+          <h2 id="pickup-heading">Choose a pickup time</h2>
+          {pickupMeal && <p>{pickupMeal.name} · {pickupMeal.available_start}–{pickupMeal.available_end} Ghana time</p>}
+          <Input label="Pickup date" name="pickup-date" type="date" value={pickupDate} min={ghanaDate(currentTime)}
+            onChange={(event) => setPickupDate(event.target.value)} required />
+          <Input label="Pickup time" name="pickup-time" type="time" value={pickupTime}
+            onChange={(event) => setPickupTime(event.target.value)} />
+          {pickupError && <p role="alert">{pickupError}</p>}
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => pickupDialog.current.close()}>Cancel</Button>
+            <Button type="submit">Add to cart</Button>
+          </div>
+        </form>
+      </dialog>
     </div>
   );
 }

@@ -6,13 +6,20 @@ import express from "express";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
+import { promisify } from "node:util";
+import { argon2id, hash as hashArgon2, verify as verifyArgon2 } from "argon2";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createServer as createHttpServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import multer from "multer";
 import { createObjectCsvWriter } from "csv-writer";
 import { put } from "@vercel/blob";
 import pg from "pg";
+import { applyDatabaseSchema } from "./lib/databaseSchema.js";
+import { databaseConnectionOptions } from "./lib/databaseConnection.js";
+import { createMfaSecret, matchingMfaCounter, sealMfa, staffMfaKey, unsealMfa } from "./lib/staffMfa.js";
 import { getTrustedOrigins } from "./lib/requestOrigins.js";
+import { DAILY_MEAL_DAYS, ghanaDate, ghanaTime, isMealScheduled, isTime, nextMealDate, normalizeMealDays } from "./lib/mealAvailability.js";
 import {
   buildPaymentLines,
   isVerifiedPaystackPayment,
@@ -38,26 +45,37 @@ let activePool;
 let sessionCleanup;
 let rateLimitCleanup;
 
-export async function createApp(expressFramework = express) {
+export async function createApp(expressFramework = express, httpServer) {
   const app = expressFramework();
+  const production = process.env.NODE_ENV === "production";
+  const mfaKey = production || process.env.STAFF_MFA_KEY ? staffMfaKey(process.env.STAFF_MFA_KEY) : null;
+  const verifiedBuyersOnly = process.env.REQUIRE_VERIFIED_BUYERS !== undefined
+    ? process.env.REQUIRE_VERIFIED_BUYERS === "true" : production;
   if (!process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL must point to a PostgreSQL database.");
   }
   const pool = activePool = new pg.Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+    ...databaseConnectionOptions(process.env.DATABASE_URL, { requireTls: process.env.NODE_ENV === "production" }),
     max: isVercel ? 1 : 10,
     connectionTimeoutMillis: 10000,
     idleTimeoutMillis: 30000,
   });
   pool.on("error", (error) => console.error("Unexpected PostgreSQL pool error:", error));
+  app.locals.closeDatabase = () => pool.end();
   const transactionContext = new AsyncLocalStorage();
+  const requestContext = new AsyncLocalStorage();
+  app.use((req, res, next) => requestContext.run({}, next));
   const toPostgresParameters = (sql) => {
     let index = 0;
     return sql.replace(/\?/g, () => `$${++index}`);
   };
   const query = (sql, params = []) => {
-    const executor = transactionContext.getStore() || pool;
+    const transaction = transactionContext.getStore();
+    if (!transaction && requestContext.getStore()?.actorId &&
+        /^\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(?:meals|payments|users|staff_mfa)\b/i.test(sql)) {
+      return db.transaction(() => query(sql, params))();
+    }
+    const executor = transaction || pool;
     return executor.query(toPostgresParameters(sql), params);
   };
   const db = {
@@ -71,6 +89,8 @@ export async function createApp(expressFramework = express) {
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
+        const actorId = requestContext.getStore()?.actorId;
+        if (actorId) await client.query("SELECT set_config('cafeteria.actor_id', $1, true)", [actorId]);
         const result = await transactionContext.run(client, () => callback(...args));
         await client.query("COMMIT");
         return result;
@@ -85,7 +105,6 @@ export async function createApp(expressFramework = express) {
         client.release();
       }
     },
-    close: () => pool.end(),
   };
   const ADMIN_ROLE = "Admin";
   const SELLER_ROLE = "Seller";
@@ -98,6 +117,15 @@ export async function createApp(expressFramework = express) {
   );
   const APP_BASE_URL = process.env.APP_BASE_URL ||
     (isVercel && process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : undefined);
+  const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim();
+  const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
+  if (verifiedBuyersOnly && (!googleClientId || !googleClientSecret)) {
+    throw new Error("Configure Google OAuth to require verified Buyer accounts.");
+  }
+  const googleCallbackPath = "/api/auth/google/callback";
+  const googleRedirectUri = googleClientId && googleClientSecret
+    ? new URL(googleCallbackPath, APP_BASE_URL || `http://localhost:${process.env.PORT || 3000}`).href
+    : null;
 
   if (process.env.NODE_ENV === "production") {
     const requiredPaystackPrefix = isTestPaystackMode ? "sk_test_" : "sk_live_";
@@ -115,28 +143,24 @@ export async function createApp(expressFramework = express) {
     }
   }
 
-  const hashPassword = (password) => {
-    const salt = crypto.randomBytes(16).toString("hex");
-    const hash = crypto.scryptSync(password, salt, 64).toString("hex");
-    return `${salt}:${hash}`;
-  };
+  const hashPassword = (password) => hashArgon2(password, {
+    type: argon2id,
+    memoryCost: 64 * 1024,
+    timeCost: 3,
+    parallelism: 1,
+  });
 
-  const verifyPassword = (password, storedPassword) => {
-    if (!storedPassword || !storedPassword.includes(":")) {
-      return false;
+  const scrypt = promisify(crypto.scrypt);
+  const verifyPassword = async (password, storedPassword) => {
+    if (typeof storedPassword !== "string") return false;
+    if (storedPassword.startsWith("$argon2id$")) {
+      return verifyArgon2(storedPassword, password);
     }
+    if (!/^[a-f0-9]{32}:[a-f0-9]{128}$/.test(storedPassword)) return false;
 
     const [salt, hash] = storedPassword.split(":");
-    if (!salt || !hash) {
-      return false;
-    }
-
-    const derived = crypto.scryptSync(password, salt, 64).toString("hex");
-    try {
-      return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(derived, "hex"));
-    } catch (error) {
-      return false;
-    }
+    const derived = await scrypt(password, salt, 64);
+    return crypto.timingSafeEqual(Buffer.from(hash, "hex"), derived);
   };
 
   app.set("trust proxy", process.env.NODE_ENV === "production" ? 1 : false);
@@ -170,6 +194,7 @@ export async function createApp(expressFramework = express) {
     path: csvPath,
     header: [
       { id: "id", title: "id" },
+      { id: "item_code", title: "item_code" },
       { id: "name", title: "name" },
       { id: "category", title: "category" },
       { id: "description", title: "description" },
@@ -178,6 +203,7 @@ export async function createApp(expressFramework = express) {
       { id: "image_url", title: "image_url" },
       { id: "available_start", title: "available_start" },
       { id: "available_end", title: "available_end" },
+      { id: "available_days", title: "available_days" },
     ],
   });
 
@@ -187,169 +213,30 @@ export async function createApp(expressFramework = express) {
     await csvWriter.writeRecords(meals);
   };
 
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS meals (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      category TEXT NOT NULL,
-      description TEXT,
-      price DOUBLE PRECISION NOT NULL,
-      stock INTEGER NOT NULL,
-      image_url TEXT,
-      available_start TEXT,
-      available_end TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS sales (
-      id TEXT PRIMARY KEY,
-      meal_id TEXT,
-      quantity INTEGER,
-      total_price DOUBLE PRECISION,
-      customer_name TEXT,
-      timestamp TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS preorders (
-      id TEXT PRIMARY KEY,
-      customer_name TEXT,
-      meal_id TEXT,
-      quantity INTEGER,
-      pickup_time TEXT,
-      status TEXT DEFAULT 'Pending',
-      timestamp TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS feedback (
-      id TEXT PRIMARY KEY,
-      customer_name TEXT,
-      meal_id TEXT,
-      rating INTEGER,
-      comment TEXT,
-      timestamp TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS notifications (
-      id TEXT PRIMARY KEY,
-      message TEXT,
-      recipients_count INTEGER,
-      channel TEXT,
-      timestamp TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      email TEXT UNIQUE,
-      role TEXT,
-      password TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS user_notifications (
-      id TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      type TEXT NOT NULL,
-      title TEXT NOT NULL,
-      message TEXT NOT NULL,
-      meal_id TEXT,
-      timestamp TEXT NOT NULL,
-      read_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS sessions (
-      token_hash TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-    );
-
-    CREATE TABLE IF NOT EXISTS rate_limits (
-      key TEXT PRIMARY KEY,
-      count INTEGER NOT NULL,
-      reset_at BIGINT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS payments (
-      reference TEXT PRIMARY KEY,
-      user_id TEXT NOT NULL,
-      amount_kobo INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      reserved_until TEXT NOT NULL,
-      verified_at TEXT,
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS payment_items (
-      id BIGSERIAL PRIMARY KEY,
-      reference TEXT NOT NULL,
-      meal_id TEXT NOT NULL,
-      quantity INTEGER NOT NULL,
-      pickup_time TEXT,
-      unit_amount INTEGER NOT NULL,
-      FOREIGN KEY (reference) REFERENCES payments(reference) ON DELETE CASCADE
-    );
-  `);
-
-  for (const table of ["sales", "preorders", "feedback"]) {
-    await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  if (process.env.NODE_ENV !== "production") {
+    await db.transaction(() => applyDatabaseSchema(db))();
+  } else {
+    const databaseRole = await db.prepare(`
+      SELECT r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolbypassrls
+        OR has_schema_privilege(current_user, current_schema(), 'CREATE')
+        OR EXISTS (
+          SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = current_schema() AND c.relname IN ('meals', 'users', 'security_audit')
+            AND pg_has_role(current_user, c.relowner, 'MEMBER')
+        ) AS elevated
+      FROM pg_roles r WHERE r.rolname = current_user
+    `).get();
+    if (databaseRole?.elevated) {
+      throw new Error("Production DATABASE_URL must use a restricted role. Run npm run migrate:schema with the schema-owner URL.");
+    }
   }
-  await db.exec(`
-    ALTER TABLE sales ADD COLUMN IF NOT EXISTS reference TEXT;
-    ALTER TABLE sales ADD COLUMN IF NOT EXISTS order_status TEXT NOT NULL DEFAULT 'new';
-    ALTER TABLE preorders ADD COLUMN IF NOT EXISTS seller_id TEXT REFERENCES users(id) ON DELETE SET NULL;
-    ALTER TABLE preorders ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'unpaid';
-    ALTER TABLE user_notifications ADD COLUMN IF NOT EXISTS related_id TEXT;
-    CREATE INDEX IF NOT EXISTS sales_reference_idx ON sales (reference);
-    CREATE INDEX IF NOT EXISTS preorders_seller_idx ON preorders (seller_id, timestamp DESC);
-  `);
-  await db.exec(`
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT;
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS meal_email_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS meal_sms_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
-    CREATE INDEX IF NOT EXISTS user_notifications_user_timestamp_idx
-      ON user_notifications (user_id, timestamp DESC);
-  `);
-  await db.exec("ALTER TABLE meals ADD COLUMN IF NOT EXISTS seller_id TEXT REFERENCES users(id) ON DELETE SET NULL");
-  await db.exec("ALTER TABLE meals ADD COLUMN IF NOT EXISTS availability_status TEXT NOT NULL DEFAULT 'available'");
-  await db.exec(`
-    CREATE INDEX IF NOT EXISTS payments_reservations_idx ON payments (status, reserved_until);
-    CREATE INDEX IF NOT EXISTS payment_items_meal_idx ON payment_items (meal_id);
-    CREATE INDEX IF NOT EXISTS sessions_expiration_idx ON sessions (expires_at);
-    CREATE INDEX IF NOT EXISTS rate_limits_expiration_idx ON rate_limits (reset_at);
-    CREATE INDEX IF NOT EXISTS meals_seller_id_idx ON meals (seller_id);
-  `);
-await db.exec(`
-  CREATE TABLE IF NOT EXISTS seller_order_notification_deliveries (
-    reference TEXT NOT NULL REFERENCES payments(reference) ON DELETE CASCADE,
-    seller_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    channel TEXT NOT NULL CHECK (channel IN ('email', 'sms')),
-    status TEXT NOT NULL DEFAULT 'sending'
-      CHECK (status IN ('sending', 'sent', 'failed')),
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (reference, seller_id, channel)
-  );
-
-    CREATE TABLE IF NOT EXISTS order_assignments (
-      id TEXT PRIMARY KEY,
-      sale_id TEXT NOT NULL REFERENCES sales(id) ON DELETE CASCADE,
-      seller_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-      status TEXT NOT NULL DEFAULT 'new'
-        CHECK (status IN ('new','accepted','preparing','ready','completed','cancelled')),
-      assigned_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL,
-      UNIQUE(sale_id)
-    );
-`);
-await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NULL");
-
-
 
   const userCount = await db.prepare("SELECT COUNT(*) as count FROM users").get();
   if (Number(userCount.count) === 0 && process.env.NODE_ENV !== "production") {
     const userStmt = db.prepare("INSERT INTO users (id, name, email, role, password) VALUES (?, ?, ?, ?, ?)");
-    await userStmt.run("user-admin", "Administrator", "admin@ebd.com", ADMIN_ROLE, hashPassword("admin123"));
-    await userStmt.run("user-seller", "Seller", "seller@ebd.com", SELLER_ROLE, hashPassword("seller123"));
-    await userStmt.run("user-customer", "Customer", "student@ebd.com", CUSTOMER_ROLE, hashPassword("student123"));
+    await userStmt.run("user-admin", "Administrator", "admin@ebd.com", ADMIN_ROLE, await hashPassword("admin123"));
+    await userStmt.run("user-seller", "Seller", "seller@ebd.com", SELLER_ROLE, await hashPassword("seller123"));
+    await userStmt.run("user-customer", "Customer", "student@ebd.com", CUSTOMER_ROLE, await hashPassword("student123"));
   } else if (process.env.NODE_ENV === "production") {
     const adminEmail = process.env.EBD_ADMIN_EMAIL?.trim().toLowerCase();
     const adminPassword = process.env.EBD_ADMIN_PASSWORD;
@@ -371,7 +258,7 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
         "Administrator",
         adminEmail,
         ADMIN_ROLE,
-        hashPassword(adminPassword)
+        await hashPassword(adminPassword)
       );
     } else if (Number(userCount.count) === 0) {
       throw new Error("Set EBD_ADMIN_EMAIL and EBD_ADMIN_PASSWORD to bootstrap a production administrator.");
@@ -379,7 +266,7 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
 
     const legacyAdmin = await db.prepare("SELECT id, email, password FROM users WHERE id = ? OR email = ?")
       .get("user-admin", "admin@ebd.com");
-    if (legacyAdmin && verifyPassword("admin123", legacyAdmin.password)) {
+    if (legacyAdmin && await verifyPassword("admin123", legacyAdmin.password)) {
       if (!hasBootstrapConfig) {
         throw new Error("The default administrator password is still active. Set EBD_ADMIN_EMAIL and EBD_ADMIN_PASSWORD to rotate it.");
       }
@@ -387,7 +274,7 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
       if (emailOwner) throw new Error("EBD_ADMIN_EMAIL is already assigned to another account.");
       await db.prepare("UPDATE users SET email = ?, password = ?, role = ? WHERE id = ?").run(
         adminEmail,
-        hashPassword(adminPassword),
+        await hashPassword(adminPassword),
         ADMIN_ROLE,
         legacyAdmin.id
       );
@@ -398,19 +285,40 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
       ["user-customer", "student@ebd.com", "student123"],
     ]) {
       const legacyUser = await db.prepare("SELECT id, password FROM users WHERE id = ? OR email = ?").get(id, email);
-      if (legacyUser && verifyPassword(password, legacyUser.password)) {
+      if (legacyUser && await verifyPassword(password, legacyUser.password)) {
         await db.prepare("DELETE FROM users WHERE id = ?").run(legacyUser.id);
       }
     }
   }
 
+  const demoMeals = {
+    "Breakfast Meals": [
+      ["Hausa Koko", "Spiced millet porridge.", "hausa-koko.jpg"],
+      ["Waakye", "Rice and beans served with Ghanaian pepper sauce.", "waakye.jpg"],
+    ],
+    "Lunch Meals": [
+      ["Ghanaian Jollof Rice", "Rice cooked in a seasoned tomato base.", "jollof.jpg"],
+      ["Banku and Tilapia", "Fermented corn and cassava dough served with tilapia.", "banku-tilapia.jpg"],
+    ],
+    Snacks: [
+      ["Kelewele", "Spiced fried ripe plantain.", "kelewele.jpg"],
+      ["Bofrot", "Golden Ghanaian fried dough.", "bofrot.jpg"],
+    ],
+    Beverages: [
+      ["Sobolo", "Chilled hibiscus drink.", "sobolo.png"],
+      ["Mashed Kenkey", "A chilled maize drink with honey and ginger.", "mashed-kenkey.jpg"],
+    ],
+    Desserts: [
+      ["Nkatie Cake", "Sweet, crunchy groundnut brittle.", "nkatie-cake.jpg"],
+      ["Fresh Mango", "Ripe seasonal mango.", "mango.jpg"],
+    ],
+  };
   const mealCount = await db.prepare("SELECT COUNT(*) as count FROM meals").get();
   if (Number(mealCount.count) === 0 && process.env.NODE_ENV !== "production") {
-    const categories = ["Breakfast Meals", "Lunch Meals", "Snacks", "Beverages", "Desserts"];
     const stmt = db.prepare("INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
 
-    for (let i = 1; i <= 50; i++) {
-      const cat = categories[Math.floor(Math.random() * categories.length)];
+    let i = 0;
+    for (const [cat, dishes] of Object.entries(demoMeals)) {
       let start = "06:00";
       let end = "20:00";
 
@@ -425,20 +333,47 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
         end = "20:00";
       }
 
-      await stmt.run(
-        `meal-${i}`,
-        `${cat} Option ${i}`,
-        cat,
-        `Freshly prepared ${cat.toLowerCase()} special`,
-        (Math.random() * 30 + 5).toFixed(2),
-        Math.floor(Math.random() * 100),
-        `https://picsum.photos/seed/meal${i}/400/300`,
-        start,
-        end
-      );
+      for (const [name, description, image] of dishes) {
+        await stmt.run(
+          `meal-${++i}`,
+          name,
+          cat,
+          description,
+          (Math.random() * 30 + 5).toFixed(2),
+          Math.floor(Math.random() * 100),
+          `/assets/demo-meals/${image}`,
+          start,
+          end
+        );
+      }
     }
   } else if (Number(mealCount.count) === 0) {
     console.warn("The production menu is empty. Add meals using the admin account after deployment.");
+  }
+  if (process.env.NODE_ENV !== "production" && Number(mealCount.count) > 0) {
+    const findDemoMeals = db.prepare(`
+      SELECT id FROM meals
+      WHERE category = ? AND seller_id IS NULL AND id ~ '^meal-[0-9]+$'
+        AND name = category || ' Option ' || substr(id, 6)
+        AND description = 'Freshly prepared ' || lower(category) || ' special'
+        AND (image_url = ? OR image_url = 'https://picsum.photos/seed/meal' || substr(id, 6) || '/400/300')
+      ORDER BY length(id), id
+      FOR UPDATE
+    `);
+    const updateDemoMeal = db.prepare("UPDATE meals SET name = ?, description = ?, image_url = ? WHERE id = ?");
+    await db.transaction(async () => {
+      for (const [category, dishes] of Object.entries(demoMeals)) {
+        const meals = await findDemoMeals.all(category, `/demo-meals/${dishes[0][2]}`);
+        for (const [index, meal] of meals.entries()) {
+          const [name, description, image] = dishes[index % dishes.length];
+          await updateDemoMeal.run(name, description, `/assets/demo-meals/${image}`, meal.id);
+        }
+      }
+    })();
+    await db.prepare(`
+      UPDATE meals SET image_url = '/assets' || image_url
+      WHERE seller_id IS NULL AND id ~ '^meal-[0-9]+$' AND image_url LIKE '/demo-meals/%'
+    `).run();
   }
 
   app.use((req, res, next) => {
@@ -498,6 +433,9 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
 
   app.use(express.json({ limit: "1mb" }));
   app.use("/uploads", express.static(uploadsDir));
+  if (!isVercel) {
+    app.use("/assets/demo-meals", express.static(fileURLToPath(new URL("./assets/demo-meals/", import.meta.url))));
+  }
 
   const asyncHandler = (handler) => (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(next);
@@ -592,7 +530,8 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
 
     const tokenHash = crypto.createHash("sha256").update(match[1]).digest("hex");
     const session = await db.prepare(`
-      SELECT users.id, users.name, users.email, users.role, sessions.expires_at
+      SELECT users.id, users.name, users.email, users.role, users.google_subject,
+        sessions.expires_at, sessions.mfa_verified
       FROM sessions JOIN users ON users.id = sessions.user_id
       WHERE sessions.token_hash = ?
     `).get(tokenHash);
@@ -601,6 +540,8 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
       await db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(tokenHash);
       return null;
     }
+    if ((mfaKey && [ADMIN_ROLE, SELLER_ROLE].includes(session.role) && !session.mfa_verified) ||
+        (verifiedBuyersOnly && session.role === CUSTOMER_ROLE && !session.google_subject)) return null;
 
     req.user = {
       id: session.id,
@@ -608,6 +549,8 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
       email: session.email,
       role: session.role,
     };
+    const auditContext = requestContext.getStore();
+    if (auditContext) auditContext.actorId = session.id;
     return req.user;
   };
 
@@ -628,17 +571,18 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
     };
   };
 
-  const createSession = async (user, res) => {
+  const createSession = async (user, res, mfaVerified = false) => {
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_DURATION_MS).toISOString();
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
-    await db.prepare("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)").run(
+    await db.prepare("INSERT INTO sessions (token_hash, user_id, expires_at, mfa_verified) VALUES (?, ?, ?, ?)").run(
       tokenHash,
       user.id,
-      expiresAt
+      expiresAt,
+      mfaVerified
     );
     const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
-    res.setHeader(
+    res.append(
       "Set-Cookie",
       `ebd_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_DURATION_MS / 1000}${secure}`
     );
@@ -657,7 +601,6 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
 
   const clientError = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
   const isPositiveInteger = (value) => Number.isSafeInteger(Number(value)) && Number(value) > 0;
-  const isTime = (value) => typeof value === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 
   const paystackRequest = async (endpoint, options = {}) => {
     if (!PAYSTACK_SECRET_KEY) {
@@ -738,12 +681,12 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
     }
 
     const saleStatement = db.prepare(`
-      INSERT INTO sales (id, meal_id, quantity, total_price, customer_name, timestamp, user_id, reference, order_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new')
+      INSERT INTO sales (id, meal_id, quantity, total_price, customer_name, timestamp, user_id, reference, pickup_time, pickup_date, order_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
     `);
     const preorderStatement = db.prepare(`
-      INSERT INTO preorders (id, customer_name, meal_id, quantity, pickup_time, status, timestamp, user_id)
-      VALUES (?, ?, ?, ?, ?, 'Pending', ?, ?)
+      INSERT INTO preorders (id, customer_name, meal_id, quantity, pickup_time, pickup_date, status, timestamp, user_id)
+      VALUES (?, ?, ?, ?, ?, ?, 'Pending', ?, ?)
     `);
     for (const item of items) {
       const saleId = crypto.randomUUID();
@@ -756,7 +699,9 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
         user.name,
         now,
         payment.user_id,
-        reference
+        reference,
+        item.pickup_time,
+        item.pickup_date
       );
       await db.prepare(`
         INSERT INTO order_assignments (id, sale_id, seller_id, status, assigned_at, updated_at)
@@ -785,6 +730,7 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
           item.meal_id,
           item.quantity,
           item.pickup_time,
+          item.pickup_date,
           now,
           payment.user_id
         );
@@ -795,7 +741,7 @@ await db.exec("ALTER TABLE order_assignments ALTER COLUMN seller_id DROP NOT NUL
           : await db.prepare("SELECT id FROM users WHERE role = ?").all(SELLER_ROLE);
         for (const recipient of recipients) {
           await db.prepare("INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at) VALUES (?, ?, 'preorder', 'New pre-order', ?, ?, ?, ?, NULL)")
-            .run(crypto.randomUUID(), recipient.id, `${meal?.name || "Shared menu meal"} (x${item.quantity}) requested for pickup at ${item.pickup_time}.`, item.meal_id, preorderId, now);
+            .run(crypto.randomUUID(), recipient.id, `${meal?.name || "Shared menu meal"} (x${item.quantity}) requested for pickup: ${[item.pickup_date, item.pickup_time].filter(Boolean).join(" ")}.`, item.meal_id, preorderId, now);
         }
       }
     }
@@ -1051,6 +997,20 @@ const verifyAndFulfillPayment = async (reference) => {
 
 
   const isAdmin = requireRoles([ADMIN_ROLE]);
+  app.get("/api/audit-log", isAdmin, asyncHandler(async (req, res) => {
+    const { before } = req.query;
+    if (before !== undefined && (typeof before !== "string" || !/^[1-9]\d{0,18}$/.test(before) ||
+        BigInt(before) > 9223372036854775807n)) {
+      return res.status(400).json({ message: "Invalid audit log cursor." });
+    }
+    const events = await db.prepare(`
+      SELECT * FROM cafeteria_audit_log
+      WHERE (?::bigint IS NULL OR id < ?::bigint)
+      ORDER BY id DESC LIMIT 51
+    `).all(before ?? null, before ?? null);
+    res.set("Cache-Control", "no-store");
+    res.json({ events: events.slice(0, 50), next: events.length > 50 ? events[49].id : null });
+  }));
   const isStaff = requireRoles([ADMIN_ROLE, SELLER_ROLE]);
   const isBuyer = requireRoles([CUSTOMER_ROLE]);
 
@@ -1188,6 +1148,7 @@ const verifyAndFulfillPayment = async (reference) => {
       imageUrl,
       available_start,
       available_end,
+      available_days,
       availability_status,
     } = req.body;
 
@@ -1196,6 +1157,10 @@ const verifyAndFulfillPayment = async (reference) => {
     const parsedPrice = Number(price);
     const parsedStock = Number(stock);
     const normalizedAvailability = availability_status || "available";
+    const normalizedDays = normalizeMealDays(available_days);
+    if (available_days !== undefined && !normalizedDays) {
+      return res.status(400).json({ message: "Choose at least one available day." });
+    }
     if (
       typeof id !== "string" || !id.trim() ||
       typeof name !== "string" || !name.trim() || name.length > 120 ||
@@ -1222,15 +1187,15 @@ const verifyAndFulfillPayment = async (reference) => {
     const savedImageUrl = req.file ? await saveUploadedImage(req.file) : resolvedImageUrl;
     const sellerId = req.user.role === SELLER_ROLE ? req.user.id : null;
     const savedMeal = await db.prepare(`
-      INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end, seller_id, availability_status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO meals (id, name, category, description, price, stock, image_url, available_start, available_end, seller_id, availability_status, available_days)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET
         name = EXCLUDED.name, category = EXCLUDED.category, description = EXCLUDED.description,
         price = EXCLUDED.price, stock = EXCLUDED.stock, image_url = EXCLUDED.image_url,
         available_start = EXCLUDED.available_start, available_end = EXCLUDED.available_end,
-        availability_status = EXCLUDED.availability_status
+        availability_status = EXCLUDED.availability_status, available_days = COALESCE(?, meals.available_days)
       WHERE ? = ? OR meals.seller_id = ?
-      RETURNING id
+      RETURNING id, item_code
     `).get(
       id.trim(),
       name.trim(),
@@ -1243,6 +1208,8 @@ const verifyAndFulfillPayment = async (reference) => {
       available_end,
       sellerId,
       normalizedAvailability,
+      normalizedDays || DAILY_MEAL_DAYS,
+      normalizedDays,
       req.user.role,
       ADMIN_ROLE,
       req.user.id
@@ -1265,7 +1232,7 @@ const verifyAndFulfillPayment = async (reference) => {
       console.error("Meal notifications could not be created:", error);
       notificationError = "The meal was saved, but buyer notifications could not be created.";
     }
-    res.json({ success: true, notifications, notificationError });
+    res.json({ success: true, item_code: savedMeal.item_code, notifications, notificationError });
   }));
 
   app.delete("/api/meals/:id", isStaff, asyncHandler(async (req, res) => {
@@ -1315,7 +1282,7 @@ const verifyAndFulfillPayment = async (reference) => {
   app.get("/api/my-orders", isBuyer, asyncHandler(async (req, res) => {
     const orders = await db.prepare(`
       SELECT s.id, s.meal_id, m.name AS meal_name, s.quantity, s.total_price, s.timestamp,
-        s.order_status, a.status AS assignment_status, p.status AS payment_status, p.reference AS order_reference
+        s.order_status, s.pickup_time, s.pickup_date, a.status AS assignment_status, p.status AS payment_status, p.reference AS order_reference
       FROM sales s JOIN meals m ON m.id = s.meal_id
       LEFT JOIN order_assignments a ON a.sale_id = s.id
       LEFT JOIN payments p ON p.reference = s.reference
@@ -1333,7 +1300,7 @@ const verifyAndFulfillPayment = async (reference) => {
         SELECT s.*, m.name AS meal_name, m.seller_id AS meal_seller_id, p.status AS payment_status
         FROM sales s JOIN meals m ON m.id = s.meal_id
         LEFT JOIN payments p ON p.reference = s.reference
-        WHERE s.id = ? FOR UPDATE
+        WHERE s.id = ? FOR UPDATE OF s
       `).get(req.params.id);
       if (!sale) throw clientError("Order not found.", 404);
       if (sale.payment_status && sale.payment_status !== "paid") throw clientError("Only paid orders can be processed.", 409);
@@ -1350,8 +1317,8 @@ const verifyAndFulfillPayment = async (reference) => {
       if (status !== "accepted" && assignment.status === "new") throw clientError("Accept this order before updating its progress.", 409);
       const now = new Date().toISOString();
       const assignedSeller = assignment.seller_id || (req.user.role === SELLER_ROLE ? req.user.id : null);
-      await db.prepare("UPDATE order_assignments SET seller_id = ?, status = ?, updated_at = ? WHERE sale_id = ? AND (seller_id IS NULL OR seller_id = ?)")
-        .run(assignedSeller, status, now, sale.id, req.user.id);
+      await db.prepare("UPDATE order_assignments SET seller_id = ?, status = ?, updated_at = ? WHERE sale_id = ?")
+        .run(assignedSeller, status, now, sale.id);
       await db.prepare("UPDATE sales SET order_status = ? WHERE id = ?").run(status, sale.id);
       const title = `Order ${status === "ready" ? "ready for pickup" : status}`;
       const message = `${sale.meal_name} (x${sale.quantity}) — order ${sale.reference || sale.id}.`;
@@ -1421,13 +1388,24 @@ const verifyAndFulfillPayment = async (reference) => {
         const meals = new Map();
         for (const mealId of requestedMealIds) {
           if (!mealId) continue;
-          const meal = await db.prepare("SELECT id, price, stock, availability_status FROM meals WHERE id = ? FOR UPDATE").get(mealId);
+          const meal = await db.prepare("SELECT id, name, price, stock, availability_status, available_start, available_end, available_days FROM meals WHERE id = ? FOR UPDATE").get(mealId);
           if (meal) meals.set(mealId, meal);
         }
         try {
           order = buildPaymentLines(req.body.cart, (mealId) => meals.get(mealId), isTime);
         } catch (error) {
           throw clientError(error instanceof Error ? error.message : "Invalid payment order.");
+        }
+        const currentTime = ghanaTime(now);
+        const currentDate = ghanaDate(now);
+        for (const item of order.lines) {
+          const meal = meals.get(item.meal_id);
+          const time = item.pickup_time || currentTime;
+          const date = item.pickup_time ? item.pickup_date ?? nextMealDate(meal, time, now) : currentDate;
+          if (!isMealScheduled(meal, date, time) || `${date}T${time}` < `${currentDate}T${currentTime}`) {
+            throw clientError(`${meal.name} is outside its ordering days or hours in Ghana time.`, 409);
+          }
+          item.pickup_date = item.pickup_time ? date : null;
         }
 
         const reservedQuantity = db.prepare(`
@@ -1457,11 +1435,11 @@ const verifyAndFulfillPayment = async (reference) => {
           VALUES (?, ?, ?, 'pending', ?, ?)
         `).run(reference, req.user.id, order.totalMinorUnits, nowIso, reservedUntil);
         const itemStatement = db.prepare(`
-          INSERT INTO payment_items (reference, meal_id, quantity, pickup_time, unit_amount)
-          VALUES (?, ?, ?, ?, ?)
+          INSERT INTO payment_items (reference, meal_id, quantity, pickup_time, pickup_date, unit_amount)
+          VALUES (?, ?, ?, ?, ?, ?)
         `);
         for (const item of order.lines) {
-          await itemStatement.run(reference, item.meal_id, item.quantity, item.pickup_time, item.unit_amount);
+          await itemStatement.run(reference, item.meal_id, item.quantity, item.pickup_time, item.pickup_date, item.unit_amount);
         }
       });
       await createPayment();
@@ -1531,20 +1509,26 @@ const verifyAndFulfillPayment = async (reference) => {
   }));
 
   app.post("/api/preorders", isBuyer, asyncHandler(async (req, res) => {
-    const { meal_id, quantity, pickup_time } = req.body || {};
+    const { meal_id, quantity, pickup_time, pickup_date } = req.body || {};
     if (typeof meal_id !== "string" || !meal_id.trim() || !isPositiveInteger(quantity) || !isTime(pickup_time)) {
       return res.status(400).json({ message: "A meal, positive whole-number quantity, and valid pickup time are required." });
     }
-    const meal = await db.prepare("SELECT id, seller_id, name FROM meals WHERE id = ?").get(meal_id.trim());
+    const meal = await db.prepare("SELECT id, seller_id, name, stock, availability_status, available_start, available_end, available_days FROM meals WHERE id = ?").get(meal_id.trim());
     if (!meal) return res.status(404).json({ message: "Meal not found." });
     const preorderId = crypto.randomUUID();
+    const today = new Date();
+    const date = pickup_date ?? nextMealDate(meal, pickup_time, today);
+    if (meal.availability_status !== "available" || meal.stock < Number(quantity) ||
+        !isMealScheduled(meal, date, pickup_time) || `${date}T${pickup_time}` < `${ghanaDate(today)}T${ghanaTime(today)}`) {
+      return res.status(409).json({ message: "This meal cannot be reserved at that pickup time. Check its stock and Ghana ordering hours." });
+    }
     const now = new Date().toISOString();
-    await db.prepare("INSERT INTO preorders (id, customer_name, meal_id, quantity, pickup_time, status, timestamp, user_id, seller_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(preorderId, req.user.name, meal.id, Number(quantity), pickup_time, "Pending", now, req.user.id, meal.seller_id || null);
+    await db.prepare("INSERT INTO preorders (id, customer_name, meal_id, quantity, pickup_time, pickup_date, status, timestamp, user_id, seller_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .run(preorderId, req.user.name, meal.id, Number(quantity), pickup_time, date, "Pending", now, req.user.id, meal.seller_id || null);
     const recipients = meal.seller_id ? [{ id: meal.seller_id }] : await db.prepare("SELECT id FROM users WHERE role = ?").all(SELLER_ROLE);
     for (const recipient of recipients) {
       await db.prepare("INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at) VALUES (?, ?, 'preorder', 'New pre-order', ?, ?, ?, ?, NULL)")
-        .run(crypto.randomUUID(), recipient.id, `${meal.name} (x${quantity}) requested for pickup at ${pickup_time}.`, meal.id, preorderId, now);
+        .run(crypto.randomUUID(), recipient.id, `${meal.name} (x${quantity}) requested for pickup: ${date} ${pickup_time}.`, meal.id, preorderId, now);
     }
     res.json({ success: true });
   }));
@@ -1567,7 +1551,7 @@ const verifyAndFulfillPayment = async (reference) => {
       await db.prepare("UPDATE preorders SET status = ?, seller_id = ? WHERE id = ? AND status = ? AND (seller_id IS NULL OR seller_id = ?)")
         .run(nextStatus, sellerId || null, preorder.id, preorder.status, req.user.id);
       if (preorder.user_id) await db.prepare("INSERT INTO user_notifications (id, user_id, type, title, message, meal_id, related_id, timestamp, read_at) VALUES (?, ?, 'preorder', ?, ?, ?, ?, ?, NULL)")
-        .run(crypto.randomUUID(), preorder.user_id, `Pre-order ${nextStatus.toLowerCase()}`, `${preorder.meal_name} (x${preorder.quantity}) for ${preorder.pickup_time} is ${nextStatus.toLowerCase()}.`, preorder.meal_id, preorder.id, now);
+        .run(crypto.randomUUID(), preorder.user_id, `Pre-order ${nextStatus.toLowerCase()}`, `${preorder.meal_name} (x${preorder.quantity}) for ${[preorder.pickup_date, preorder.pickup_time].filter(Boolean).join(" ")} is ${nextStatus.toLowerCase()}.`, preorder.meal_id, preorder.id, now);
       return { success: true, status: nextStatus };
     });
     res.json(await update());
@@ -1704,7 +1688,12 @@ const verifyAndFulfillPayment = async (reference) => {
     res.json({ success: true });
   }));
 
+  app.get("/api/auth/options", (req, res) => {
+    res.json({ passwordRegistration: !verifiedBuyersOnly });
+  });
+
   app.post("/api/register", registrationRateLimit, asyncHandler(async (req, res) => {
+    if (verifiedBuyersOnly) return res.status(403).json({ message: "Use Sign in with Google to create a verified Buyer account." });
     const { name, email, password, role } = req.body || {};
 
     if (role != null && role !== CUSTOMER_ROLE) {
@@ -1736,7 +1725,7 @@ const verifyAndFulfillPayment = async (reference) => {
       name: trimmedName,
       email: trimmedEmail,
       role: CUSTOMER_ROLE,
-      password: hashPassword(password),
+      password: await hashPassword(password),
     };
 
     const insertedUser = await db.prepare(`
@@ -1813,7 +1802,7 @@ app.get("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
       trimmedName,
       trimmedEmail,
       SELLER_ROLE,
-      hashPassword(password)
+      await hashPassword(password)
     );
     if (!insertedSeller) {
       return res.status(409).json({ message: "An account with this email already exists." });
@@ -1839,11 +1828,16 @@ app.get("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
     if (!seller) return res.status(404).json({ message: "Seller account not found." });
     const emailOwner = await db.prepare("SELECT id FROM users WHERE email = ? AND id <> ?").get(normalizedEmail, seller.id);
     if (emailOwner) return res.status(409).json({ message: "An account with this email already exists." });
-    const updated = password
-      ? await db.prepare(`UPDATE users SET name = ?, email = ?, phone = ?, password = ? WHERE id = ? AND role = ? RETURNING id, name, email, phone`)
-        .get(normalizedName, normalizedEmail, normalizedPhone || null, hashPassword(password), seller.id, SELLER_ROLE)
-      : await db.prepare(`UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ? AND role = ? RETURNING id, name, email, phone`)
-        .get(normalizedName, normalizedEmail, normalizedPhone || null, seller.id, SELLER_ROLE);
+    const updated = await db.transaction(async () => {
+      if (!password) {
+        return db.prepare(`UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ? AND role = ? RETURNING id, name, email, phone`)
+          .get(normalizedName, normalizedEmail, normalizedPhone || null, seller.id, SELLER_ROLE);
+      }
+      const account = await db.prepare(`UPDATE users SET name = ?, email = ?, phone = ?, password = ? WHERE id = ? AND role = ? RETURNING id, name, email, phone`)
+        .get(normalizedName, normalizedEmail, normalizedPhone || null, await hashPassword(password), seller.id, SELLER_ROLE);
+      if (account) await db.prepare("DELETE FROM sessions WHERE user_id = ?").run(account.id);
+      return account;
+    })();
     return res.json({ success: true, seller: updated });
   }));
 
@@ -1854,25 +1848,186 @@ app.get("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
     return res.json({ success: true, seller: deleted });
   }));
 
-  app.post("/api/login", loginRateLimit, asyncHandler(async (req, res) => {
-    const { email, password, role } = req.body || {};
+  const googleCookieOptions = {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+  };
+  const googleCookie = googleCookieOptions.secure ? "__Host-ebd_google" : "ebd_google";
 
-    if (typeof email !== "string" || typeof password !== "string" || !email.trim() || !password) {
+  const startGoogleAuthorization = (res) => {
+    const state = crypto.randomBytes(32).toString("base64url");
+    const verifier = crypto.randomBytes(32).toString("base64url");
+    res.cookie(googleCookie, `${state}.${verifier}`, {
+      ...googleCookieOptions,
+      maxAge: 10 * 60 * 1000,
+    });
+    const authorize = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+    authorize.search = new URLSearchParams({
+      client_id: googleClientId,
+      redirect_uri: googleRedirectUri,
+      response_type: "code",
+      scope: "openid email profile",
+      state,
+      code_challenge: crypto.createHash("sha256").update(verifier).digest("base64url"),
+      code_challenge_method: "S256",
+    });
+    return authorize.href;
+  };
+
+  app.get("/api/auth/google", loginRateLimit, (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!googleRedirectUri) return res.redirect("/?google_signin=unavailable");
+    const origin = new URL(googleRedirectUri).origin;
+    if (`${req.protocol}://${req.get("host")}` !== origin) {
+      return res.redirect(`${origin}/api/auth/google`);
+    }
+    return res.redirect(startGoogleAuthorization(res));
+  });
+
+  app.get(googleCallbackPath, loginRateLimit, asyncHandler(async (req, res) => {
+    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+    res.clearCookie(googleCookie, googleCookieOptions);
+    if (!googleRedirectUri) return res.redirect("/?google_signin=unavailable");
+
+    const transaction = (req.headers.cookie || "").match(
+      new RegExp(`(?:^|;\\s*)${googleCookie}=([A-Za-z0-9_-]{43})\\.([A-Za-z0-9_-]{43})(?:;|$)`)
+    );
+    const failGoogleSignIn = (reason) => {
+      console.warn(`Google sign-in failed: ${reason}`);
+      return res.redirect("/?google_signin=failed");
+    };
+    if (req.query.error === "access_denied") return failGoogleSignIn("Google access denied");
+    if (!transaction || req.query.state !== transaction[1] || typeof req.query.code !== "string") {
+      return failGoogleSignIn(!transaction ? "sign-in cookie missing" :
+        req.query.state !== transaction[1] ? "state mismatch" : "authorization code missing");
+    }
+    let profile;
+    let googleStage = "token exchange";
+    try {
+      const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: googleClientId,
+          client_secret: googleClientSecret,
+          redirect_uri: googleRedirectUri,
+          grant_type: "authorization_code",
+          code: req.query.code,
+          code_verifier: transaction[2],
+        }),
+        signal: AbortSignal.timeout(8000),
+        redirect: "error",
+      });
+      if (!tokenResponse.ok) {
+        const { error } = await tokenResponse.json().catch(() => ({}));
+        const knownErrors = ["invalid_client", "invalid_grant", "invalid_request", "redirect_uri_mismatch", "unauthorized_client"];
+        return failGoogleSignIn(`token exchange rejected (HTTP ${tokenResponse.status}${knownErrors.includes(error) ? `, ${error}` : ""})`);
+      }
+      const { access_token: accessToken } = await tokenResponse.json();
+      if (typeof accessToken !== "string" || !accessToken) return failGoogleSignIn("access token missing");
+      googleStage = "profile lookup";
+      const profileResponse = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(8000),
+        redirect: "error",
+      });
+      if (!profileResponse.ok) return failGoogleSignIn(`profile lookup rejected (HTTP ${profileResponse.status})`);
+      profile = await profileResponse.json();
+    } catch (error) {
+      const detail = error.name === "TimeoutError" ? "timed out" :
+        error instanceof SyntaxError ? "returned invalid JSON" : "request failed";
+      return failGoogleSignIn(`${googleStage} ${detail}`);
+    }
+
+    const email = typeof profile?.email === "string" ? profile.email.trim().toLowerCase() : "";
+    if (typeof profile?.sub !== "string" || !profile.sub || profile.sub.length > 255 ||
+        profile.email_verified !== true || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+      return failGoogleSignIn("Google profile missing a verified email or valid subject");
+    }
+
+    const findGoogleUser = db.prepare("SELECT id FROM users WHERE google_subject = ?");
+    let user = await findGoogleUser.get(profile.sub);
+    if (!user) {
+      const name = (typeof profile.name === "string" && profile.name.trim().slice(0, 120)) || email.slice(0, 120);
+      user = await db.prepare(`
+        INSERT INTO users (id, name, email, role, google_subject)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT DO NOTHING
+        RETURNING id
+      `).get(crypto.randomUUID(), name, email, CUSTOMER_ROLE, profile.sub);
+      user ||= await findGoogleUser.get(profile.sub);
+      if (!user) return res.redirect("/?google_signin=existing");
+    }
+
+    await createSession(user, res);
+    return res.redirect("/");
+  }));
+
+  app.post("/api/login", loginRateLimit, asyncHandler(async (req, res) => {
+    const { email, password, role, mfaCode, enrollment } = req.body || {};
+
+    if (typeof email !== "string" || typeof password !== "string" ||
+        !email.trim() || email.length > 254 || !password || password.length > 128) {
       return res.status(400).json({ message: "Email and password are required." });
     }
 
     const trimmedEmail = email.trim().toLowerCase();
     const user = await db.prepare("SELECT * FROM users WHERE email = ?").get(trimmedEmail);
 
-    if (!user || !verifyPassword(password, user.password)) {
+    if (!user || !(await verifyPassword(password, user.password))) {
       return res.status(401).json({ message: "Invalid email or password." });
     }
 
     if (role && (!["Admin", "Seller", "Buyer"].includes(role) || user.role !== role)) {
       return res.status(401).json({ message: "This account is not allowed for the selected role." });
     }
+    if (verifiedBuyersOnly && user.role === CUSTOMER_ROLE && !user.google_subject) {
+      return res.status(403).json({ message: "This Buyer account needs verified Google sign-in. Contact the cafeteria for help with your existing account." });
+    }
+    const auditContext = requestContext.getStore();
+    if (auditContext) auditContext.actorId = user.id;
+    const requiresMfa = Boolean(mfaKey && [ADMIN_ROLE, SELLER_ROLE].includes(user.role));
+    if (requiresMfa) {
+      res.set("Cache-Control", "no-store");
+      const existing = await db.prepare("SELECT encrypted_secret FROM staff_mfa WHERE user_id = ?").get(user.id);
+      const secretPurpose = `staff-mfa:${user.id}`;
+      const enrollmentPurpose = `staff-enrollment:${user.id}:${crypto.createHash("sha256").update(user.password).digest("hex")}`;
+      if (!mfaCode) {
+        if (existing) return res.status(202).json({ mfaRequired: true });
+        const secret = createMfaSecret();
+        const sealed = sealMfa({ secret, expires: Date.now() + 5 * 60 * 1000 }, mfaKey, enrollmentPurpose);
+        return res.status(202).json({ mfaRequired: true, enrollment: sealed, setupKey: secret });
+      }
 
-    await createSession(user, res);
+      const setup = !existing && unsealMfa(enrollment, mfaKey, enrollmentPurpose);
+      if (!existing && (!setup || setup.expires <= Date.now())) {
+        return res.status(400).json({ message: "Authenticator setup expired. Go back and sign in again." });
+      }
+      const secret = existing ? unsealMfa(existing.encrypted_secret, mfaKey, secretPurpose) : setup.secret;
+      const counter = matchingMfaCounter(secret, mfaCode);
+      if (counter === null) return res.status(401).json({ message: "The authenticator code is invalid or expired." });
+      const accepted = existing
+        ? await db.prepare("UPDATE staff_mfa SET last_counter = ? WHERE user_id = ? AND last_counter < ?")
+          .run(counter, user.id, counter)
+        : await db.prepare("INSERT INTO staff_mfa (user_id, encrypted_secret, last_counter) VALUES (?, ?, ?) ON CONFLICT DO NOTHING")
+          .run(user.id, sealMfa(secret, mfaKey, secretPurpose), counter);
+      if (!accepted.changes) return res.status(401).json({ message: "Use a new authenticator code and try again." });
+    }
+
+    if (!user.password.startsWith("$argon2id$")) {
+      const upgraded = await db.prepare("UPDATE users SET password = ? WHERE id = ? AND password = ?")
+        .run(await hashPassword(password), user.id, user.password);
+      if (upgraded.changes === 0) {
+        const current = await db.prepare("SELECT password FROM users WHERE id = ?").get(user.id);
+        if (!current || !(await verifyPassword(password, current.password))) {
+          return res.status(401).json({ message: "Invalid email or password." });
+        }
+      }
+    }
+
+    await createSession(user, res, requiresMfa);
     return res.json({
       success: true,
       user: {
@@ -1892,6 +2047,10 @@ app.get("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
     await clearSession(req, res);
     res.json({ success: true });
   }));
+
+  app.use("/api", (req, res) => {
+    res.status(404).json({ message: "API route not found." });
+  });
 
   app.use((error, req, res, next) => {
     if (error instanceof multer.MulterError) {
@@ -1919,11 +2078,17 @@ app.get("/api/sellers", isAdmin, asyncHandler(async (req, res) => {
   if (process.env.NODE_ENV !== "production") {
     try {
       const { createServer: createViteServer } = await import("vite");
+      const hmrEnabled = Boolean(httpServer) && process.env.DISABLE_HMR !== "true";
       const vite = await createViteServer({
-        server: { middlewareMode: true },
+        server: {
+          middlewareMode: true,
+          hmr: hmrEnabled ? { server: httpServer } : false,
+          ...(hmrEnabled ? {} : { ws: false }),
+        },
         appType: "spa",
       });
       app.use(vite.middlewares);
+      app.locals.closeVite = () => vite.close();
     } catch (error) {
       const distIndex = path.resolve("public/index.html");
       if (!fs.existsSync(distIndex)) {
@@ -1945,8 +2110,10 @@ async function startServer() {
   if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
     throw new Error("PORT must be a valid TCP port.");
   }
-  const app = await createApp();
-  const server = app.listen(PORT, "0.0.0.0", () => {
+  const server = createHttpServer();
+  const app = await createApp(express, server);
+  server.on("request", app);
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
@@ -1954,12 +2121,16 @@ async function startServer() {
     console.log(`${signal} received; closing server.`);
     clearInterval(sessionCleanup);
     clearInterval(rateLimitCleanup);
+    app.locals.closeVite?.().catch((error) => {
+      console.error("Vite shutdown failed:", error);
+      process.exitCode = 1;
+    });
     server.close((error) => {
       if (error) {
         console.error("HTTP server shutdown failed:", error);
         process.exitCode = 1;
       }
-      db.close().catch((poolError) => {
+      activePool.end().catch((poolError) => {
         console.error("PostgreSQL pool shutdown failed:", poolError);
         process.exitCode = 1;
       });
